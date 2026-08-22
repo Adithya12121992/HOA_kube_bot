@@ -10,6 +10,7 @@ Documents the extract → clean → chunk pipeline has been run against, to trac
 
 | Date | Scope | Result |
 |---|---|---|
+| 2026-08-22 | Pinecone backend (`ENVIRONMENT=cloud`) against the real Pinecone index: `add_chunks()` → `search()` → `reset()`, including the sections/page_start/article metadata round-trip check | Pass. See Resolved #9 below — one real (non-blocking) finding along the way. |
 | 2026-08-22 | Full consumer pipeline (`process_message`), real PDF, not mocked: extract → chunk → embed → store → summarize → status → delete → ack | Pass. Real doc (6 pages) → 3 chunks → embedded+stored (confirmed searchable in ChromaDB afterward, 0.66-0.73 similarity on a relevant query) → real 2-line summary generated via the user's actual local LM Studio instance, accurate to source content → status progressed uploaded→extracting→chunking→embedding→summarizing→ready with correct `chunks_done`/`chunks_total` at each step → file deleted → message acked. Error path also verified separately: missing file → nacks with `requeue=False`, writes `stage=error`, does not ack. |
 | 2026-08-22 | `summarize.py` local LLM path against the user's real running LM Studio instance (`qwen/qwen3-14b`) | Found and fixed a real bug — see Resolved #7 below. |
 | 2026-08-22 | Full round trip on pinned `requirements.txt` (Python 3.11, matches Docker target): extract → clean → chunk → embed → store → search | Pass. See Resolved #5 for what it took to get the pins actually installable, and Resolved #4 for a real metadata bug found in the process. |
@@ -44,6 +45,16 @@ _(none currently — see Won't Fix below for the one known remaining gap)_
 ---
 
 ## Resolved Issues
+
+### 9. Pinecone `fetch()`-by-ID unreliable for chunk_ids with special characters
+**Found:** 2026-08-22, verifying the new Pinecone storage backend's metadata round-trip against real CC&Rs chunks
+**Status:** Documented, not a bug in this codebase's actual code path — noted for future awareness
+
+**Problem:** While verifying the sections/page_start/article metadata round-trip for the new Pinecone backend (mirroring the check that caught Resolved #4's ChromaDB bug), used `index.fetch(ids=[chunk_id])` as a verification shortcut. It consistently failed to find a chunk (`"30. CC&Rs (Required Civil Code Sec. 4525).pdf:chunk_3"`) even after 10 retries with delays — looked like a real storage failure at first. Checked `describe_index_stats()` (correct count) and `index.query()` with a dummy vector (returned the exact same ID string, correctly) — the vector *is* stored correctly, `fetch()` specifically can't find it. The chunk_id contains spaces, `&`, parentheses, and a colon — likely a URL-encoding issue in how this Pinecone SDK version's `fetch()` builds its request for IDs with special characters.
+
+**Why not fixed:** `store.py`'s actual `search()` function uses `index.query()` (semantic search, POST body), not `fetch()` (direct ID lookup, apparently GET-based) — the real code path is unaffected. Re-ran the same round-trip check through `search()` instead and got an exact match (sections, page_start, article all correct). Documented rather than fixed since nothing currently in the codebase calls `fetch()` by ID — but a future feature (e.g. "get this specific chunk for citation display") that does would hit this.
+
+**Verification:** `search()`-based round trip (the real path) confirmed exact match on a real CC&Rs chunk with populated `sections`, `page_start` as `int`, and `article` correctly restored.
 
 ### 8. Consumer had a hardcoded credential-shaped default value
 **Found:** 2026-08-22, wiring the real pipeline into `src/services/consumer/app.py` (Step 2.4)
