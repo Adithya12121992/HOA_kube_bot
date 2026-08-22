@@ -6,15 +6,21 @@ Running log of real bugs/gaps found during development (via local trials against
 
 ## Open Issues
 
+_(none currently — see Won't Fix below for the one known remaining gap)_
+
+---
+
+## Won't Fix (Deliberate)
+
 ### 4. Letter-spaced text on embedded exhibit pages defeats word-level n-gram matching
 **Found:** 2026-08-22, re-verifying `src/rag/clean.py` after the n-gram fix (Resolved #3 below)
-**Status:** Open — narrow scope, low priority
+**Decision:** 2026-08-22 — not worth fixing at the extraction/cleaning layer
 
 **Problem:** After fixing whole-line matching to use word n-grams (which fully solved the watermark issue below), 3 of 69 chunks (~4%) still leak the `"Order: ZDT3W9PY5"` fragment. Root cause is different from the watermark case: pages 62-88 of this document (~22 pages) are an embedded engineering/survey exhibit section (site plan drawings — text includes `"TRACT 9644"`, `"ENGINEERS"`, `"SAN JOSE CALIFORNIA"`, `"YARD EASEMENTS"`), and on some of these pages the footer stamp renders with each letter as an individually spaced token: `"O r d e r: ZDT3W9PY5"`. Word-level n-gram matching splits on whitespace, so `"O"`, `"r"`, `"d"`, `"e"`, `"r:"` become separate single-character tokens — none of which match the confirmed `"order: zdt#w#py#"` fragment (which expects the letters run together, no internal spaces).
 
-**Scope:** Confined to the exhibit/drawing appendix at the end of the document, not the main body. Only 3 chunks affected out of 69. The leaked text itself is low-value noise from a drawing overlay (not meaningful prose), so the practical impact on retrieval quality is limited — but it's a real, distinct gap, not something to quietly fold into the n-gram fix.
+**Scope:** Confined to the exhibit/drawing appendix at the end of the document, not the main body. Only 3 chunks affected out of 69. The leaked text is low-value noise from a drawing overlay, not meaningful prose.
 
-**Possible future fix:** detect and collapse "every token is 1-2 characters" runs into a single reconstructed word before normalization (a heuristic for letter-spaced/justified text), or fall back to character-level (not word-level) n-gram matching specifically within margin-band lines that look letter-spaced.
+**Why not fixed:** it's just stray spacing artifacts in a tiny fraction of chunks, not corrupted/wrong content — an LLM generating an answer from a chunk containing `"O r d e r: ZDT3W9PY5"` amid real surrounding text isn't meaningfully thrown off by it. Not worth the added complexity of letter-spacing detection/collapsing at the extraction layer for this little value. Revisit only if it turns out to matter in practice (e.g. shows up as a real quality issue in Phase 8 benchmarking).
 
 ---
 
@@ -106,4 +112,5 @@ Also regression-checked: small multi-paragraph input (well under target size) st
 When a local trial or real usage surfaces a bug or design gap:
 1. Add an entry under **Open Issues** with: what was found, how it was found (what test/doc), root cause if known, planned fix
 2. Once fixed: move it to **Resolved Issues**, add the fix description, file/commit reference, and before/after verification data
-3. Keep entries newest-first within each section
+3. If a deliberate call is made not to fix something (cost/benefit not worth it): move it to **Won't Fix (Deliberate)** with the reasoning, instead of leaving it open indefinitely
+4. Keep entries newest-first within each section
