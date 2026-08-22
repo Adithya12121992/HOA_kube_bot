@@ -6,22 +6,55 @@ Running log of real bugs/gaps found during development (via local trials against
 
 ## Open Issues
 
-### 1. Header/footer stripping not implemented
-**Found:** 2026-08-22, during local chunking trial on `docs/30. CC&Rs (Required Civil Code Sec. 4525).pdf`
-**Status:** Open — design agreed, not yet built
+### 1. Watermark noise defeats exact-match boilerplate detection
+**Found:** 2026-08-22, verifying `src/rag/clean.py` against `docs/30. CC&Rs (Required Civil Code Sec. 4525).pdf`
+**Status:** Open — real limitation of the current (exact-line, frequency-based) detection approach
 
-**Problem:** Extracted PDF text still contains per-page boilerplate (e.g. `"HomeWiseDocs"`, `"Document not for resale"`, `"Order: ZDT3W9PY5 Address: 825 S 22nd St Order Date: 04-11-2025"`) embedded directly in the text stream. This bleeds into chunks near page boundaries, contaminating embeddings and retrieval.
+**Problem:** One recurring footer line — `"Address: 825 S 22nd St"` — appears on 72/88 pages (82%, comfortably above the 60% detection threshold) but was **not** detected as boilerplate. Root cause: a semi-transparent background watermark (something like "Attorneys at Law" + a street address, likely a law firm's stamp) overlaps the footer region on most pages, and text extraction picks up garbled, near-unique fragments of it alongside the real footer line each time:
+```
+34x  'address: # s #nd st'                          (clean, no watermark noise)
+ 6x  'attorneysatlaw address: # s #nd st'
+ 3x  'a#torneysatlaw address: # s #nd st'
+ 1x  'attorneysatuw address: # s #nd st'
+ 1x  'arrorneysatlaw address: # s #nd st'
+ ... (20+ more near-unique variants, 1 occurrence each)
+```
+Each garbled variant is its own distinct normalized string, so the vote for the real recurring line gets split across dozens of near-duplicates — none crosses the 60% threshold individually, even though the underlying "Address:" line is clearly boilerplate to a human reading it.
 
-**Confirmed in the prior project too** (`~/Desktop/Personal_Projects/HOA_bot`): its `pipeline.py` documents a "Stage 2: Clean (boilerplate removal)" step, but `clean.py` was never implemented — `documents.json` from that project still has the same footer text repeated 88 times (once per page) for the same CC&Rs document.
+**Why this wasn't "just fixed":** this needs fuzzy/near-duplicate matching (e.g. edit-distance clustering of margin-band lines, or matching on a stable *prefix* rather than the whole line) rather than exact-string frequency counting. That's a meaningfully different, harder design than what's implemented — worth its own decision rather than a quick patch bolted onto the current approach.
 
-**Planned fix (see PLAN.md Phase 2):**
-- Frequency-based detection: lines in the first/last ~N lines of each page that repeat across ≥60-70% of pages get flagged as boilerplate
-- Normalize digits before comparing (so `"Page 3 of 47"` and `"Page 4 of 47"` are recognized as the same repeating pattern)
-- Where possible, use position-aware extraction (bounding boxes) to also check that the line sits in the actual top/bottom margin band, not just line-count from the edge — this project's local trial found that a fixed 2-line margin window missed some footer lines (`"Order: ..."`, `"Address: ..."`) that repeat further from the page edge than expected. Needs a wider or position-based window.
+**Current behavior:** 3 of 4 real boilerplate elements on this document are fully and correctly stripped (`HomeWiseDocs`, `Document not for resale`, the `Order: <id>` stamp — including messy cases where it visually merged with adjacent body text, see Resolved #2 below). Only the watermark-contaminated `Address:` line survives, as its own short isolated paragraph, on pages where the watermark rendered.
 
 ---
 
 ## Resolved Issues
+
+### 2. Extraction produced one text blob per page — no real paragraph structure, boilerplate leaked into every chunk
+**Found:** 2026-08-22, during local chunking trial (naive `page.extract_text()` join)
+**Fixed:** 2026-08-22, `src/rag/extract.py` + `src/rag/clean.py` (new modules)
+
+**Problem:** Neither this project nor the prior one (`~/Desktop/Personal_Projects/HOA_bot`) ever implemented real PDF extraction — the prior project's `pipeline.py` stubs out "Stage 1: Ingest" and "Stage 2: Clean" entirely (`"Status: ⚠️ Requires ingest.py module (not included in this repo)"`). Its `documents.json` turned out to be a naive per-page text join with **zero** `\n\n` breaks in the entire 392K-character document, and footer boilerplate (`"HomeWiseDocs"`, `"Document not for resale"`, `"Order: ZDT3W9PY5..."`) repeated verbatim 88 times, once per page, contaminating every chunk near a page boundary.
+
+**Fix — two new modules:**
+- **`src/rag/extract.py`**: extracts words with bounding boxes per page (via `pdfplumber`), groups them into lines, then groups lines into real paragraphs using vertical-gap detection (a gap much larger than the page's typical line spacing = paragraph break, not just wrapped text). Produces genuine `\n\n`-separated paragraph structure instead of one blob per page.
+- **`src/rag/clean.py`**: `BoilerplateDetector` — detects repeated header/footer lines using two combined signals: (1) position — is the line within `MARGIN_FRACTION` (15%) of the top/bottom of the page, using actual page-height fractions rather than a fixed line count; and (2) frequency — does a digit-normalized version of the line repeat across ≥60% of pages. Stripping uses **substring containment**, not exact-line equality (see note below on why), with a minimum signature length (6 chars) to avoid false-positive stripping of short/generic text.
+
+**A fixed-line-count margin window isn't enough:** an earlier trial using a naive "check the first/last 2 lines of each page" window missed footer lines that sat further from the page edge (`"Order: ..."`, `"Address: ..."`) — switching to a page-height-fraction check catches these regardless of how many lines are stacked in the margin.
+
+**Exact-line matching isn't enough either — found and fixed mid-implementation:** first pass stripped by exact normalized-line equality. Verifying against the real document showed `"Order: ZDT3W9PY5"` still leaking through in 18 places, because on some pages pdfplumber's word-clustering merges the footer with an adjacent heading due to positional jitter (`"Order: ZDT3W9PY5 YARD EASEMENTS ."`, or with no space at all, `"Order: ZDT3W9PY5YARD"`, or the ID splitting onto its own line as bare `"Order:"`). Switched `strip()` to substring containment — if a confirmed boilerplate signature appears *anywhere* in a line, the whole line is dropped — which catches all of these merged/split variants. Result: `Order:` leakage went from 18 occurrences to 0.
+
+**Verification (same real 88-page CC&Rs document):**
+
+| Metric | Before (naive join) | After |
+|---|---|---|
+| Paragraphs (real `\n\n` breaks) | 1 (whole doc) | 644 |
+| `HomeWiseDocs` occurrences remaining | 88 | 0 |
+| `Document not for resale` occurrences remaining | 81 | 0 |
+| `Order: ZDT3W9PY5` occurrences remaining | 88 | 0 |
+| Chunks produced (fed into the fixed `chunk_document()`) | 1,160 (see Resolved #1) | 69 |
+| Chunks still containing boilerplate | many | 0 |
+
+See Open Issue #1 above for the one boilerplate element (watermark-contaminated `Address:` line) that still isn't caught.
 
 ### 1. Chunk overlap bug — 18x too many chunks, near-duplicate content
 **Found:** 2026-08-22, during local chunking trial on `docs/30. CC&Rs (Required Civil Code Sec. 4525).pdf`
