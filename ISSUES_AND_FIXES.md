@@ -4,6 +4,18 @@ Running log of real bugs/gaps found during development (via local trials against
 
 ---
 
+## Verification Log
+
+Documents the extract → clean → chunk pipeline has been run against, to track test coverage (not every run finds a new bug — that's the point).
+
+| Date | Document | Pages | Type | Result |
+|---|---|---|---|---|
+| 2026-08-22 | `25. Minutes of Regular Board Meetings...pdf` | 6 | report (minutes) | Clean. 3 chunks, no duplication, no bad progression. All boilerplate removed, including a new corruption pattern not seen before — two overlapping text elements interleaved character-by-character on 5/6 pages (`"MinuDteosc ument not for resale"`, apparently "Minutes" + "Document not for resale" rendered on top of each other) — still caught because the corrupted form itself repeated consistently across pages and matched via n-gram + substring stripping. Legitimate body-text mentions of "Board of Directors" (embedded in real sentences) correctly preserved; only the recurring standalone header instance was stripped. |
+| 2026-08-22 | `32. Annual Budget Report...pdf` | 40 | financial | Clean. 34 chunks, no duplication, no bad progression, 3.7% of text removed as boilerplate. |
+| 2026-08-22 | `30. CC&Rs...pdf` | 88 | governing | See Resolved Issues #1-#3 below — this is the document all three fixes were found and verified against. |
+
+---
+
 ## Open Issues
 
 _(none currently — see Won't Fix below for the one known remaining gap)_
