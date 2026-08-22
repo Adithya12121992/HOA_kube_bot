@@ -6,9 +6,23 @@ Running log of real bugs/gaps found during development (via local trials against
 
 ## Open Issues
 
-### 1. Watermark noise defeats exact-match boilerplate detection
+### 4. Letter-spaced text on embedded exhibit pages defeats word-level n-gram matching
+**Found:** 2026-08-22, re-verifying `src/rag/clean.py` after the n-gram fix (Resolved #3 below)
+**Status:** Open — narrow scope, low priority
+
+**Problem:** After fixing whole-line matching to use word n-grams (which fully solved the watermark issue below), 3 of 69 chunks (~4%) still leak the `"Order: ZDT3W9PY5"` fragment. Root cause is different from the watermark case: pages 62-88 of this document (~22 pages) are an embedded engineering/survey exhibit section (site plan drawings — text includes `"TRACT 9644"`, `"ENGINEERS"`, `"SAN JOSE CALIFORNIA"`, `"YARD EASEMENTS"`), and on some of these pages the footer stamp renders with each letter as an individually spaced token: `"O r d e r: ZDT3W9PY5"`. Word-level n-gram matching splits on whitespace, so `"O"`, `"r"`, `"d"`, `"e"`, `"r:"` become separate single-character tokens — none of which match the confirmed `"order: zdt#w#py#"` fragment (which expects the letters run together, no internal spaces).
+
+**Scope:** Confined to the exhibit/drawing appendix at the end of the document, not the main body. Only 3 chunks affected out of 69. The leaked text itself is low-value noise from a drawing overlay (not meaningful prose), so the practical impact on retrieval quality is limited — but it's a real, distinct gap, not something to quietly fold into the n-gram fix.
+
+**Possible future fix:** detect and collapse "every token is 1-2 characters" runs into a single reconstructed word before normalization (a heuristic for letter-spaced/justified text), or fall back to character-level (not word-level) n-gram matching specifically within margin-band lines that look letter-spaced.
+
+---
+
+## Resolved Issues
+
+### 3. Watermark noise defeated exact-match boilerplate detection
 **Found:** 2026-08-22, verifying `src/rag/clean.py` against `docs/30. CC&Rs (Required Civil Code Sec. 4525).pdf`
-**Status:** Open — real limitation of the current (exact-line, frequency-based) detection approach
+**Fixed:** 2026-08-22, `src/rag/clean.py` — switched from whole-line to word n-gram frequency detection
 
 **Problem:** One recurring footer line — `"Address: 825 S 22nd St"` — appears on 72/88 pages (82%, comfortably above the 60% detection threshold) but was **not** detected as boilerplate. Root cause: a semi-transparent background watermark (something like "Attorneys at Law" + a street address, likely a law firm's stamp) overlaps the footer region on most pages, and text extraction picks up garbled, near-unique fragments of it alongside the real footer line each time:
 ```
@@ -21,13 +35,17 @@ Running log of real bugs/gaps found during development (via local trials against
 ```
 Each garbled variant is its own distinct normalized string, so the vote for the real recurring line gets split across dozens of near-duplicates — none crosses the 60% threshold individually, even though the underlying "Address:" line is clearly boilerplate to a human reading it.
 
-**Why this wasn't "just fixed":** this needs fuzzy/near-duplicate matching (e.g. edit-distance clustering of margin-band lines, or matching on a stable *prefix* rather than the whole line) rather than exact-string frequency counting. That's a meaningfully different, harder design than what's implemented — worth its own decision rather than a quick patch bolted onto the current approach.
+**Fix:** Changed `BoilerplateDetector.detect()` from counting whole-line frequency to counting **word n-gram** frequency (contiguous word sequences, 1-8 words long, extracted from every margin-band line). A stable fragment like `"address: # s #nd st"` now gets counted on its own, independent of whatever noise surrounds it on a given page — the watermark garbage varies, but the n-gram containing just the address text is identical every time it appears cleanly, and still present as a substring even when noise is attached. Added `_keep_maximal_fragments()` to de-duplicate the confirmed set (drop shorter fragments that are substrings of a longer confirmed one, e.g. `"address: #"` once `"address: # s #nd st"` is also confirmed) so the boilerplate set stays small and readable.
 
-**Current behavior:** 3 of 4 real boilerplate elements on this document are fully and correctly stripped (`HomeWiseDocs`, `Document not for resale`, the `Order: <id>` stamp — including messy cases where it visually merged with adjacent body text, see Resolved #2 below). Only the watermark-contaminated `Address:` line survives, as its own short isolated paragraph, on pages where the watermark rendered.
+**Verification (same real document):**
 
----
+| Metric | Before (whole-line) | After (n-gram) |
+|---|---|---|
+| Boilerplate signatures detected | 4 | 5 (now includes the address fragment) |
+| `Address: 825 S 22nd St` occurrences remaining | 72 | 0 |
+| All 4 originally-targeted boilerplate elements | 3/4 clean | 4/4 clean |
 
-## Resolved Issues
+Re-running the full pipeline (extract → clean → chunk) surfaced a **new**, narrower issue — letter-spaced text on an embedded exhibit section — documented separately as Open Issue #4 above, rather than folded into this fix.
 
 ### 2. Extraction produced one text blob per page — no real paragraph structure, boilerplate leaked into every chunk
 **Found:** 2026-08-22, during local chunking trial (naive `page.extract_text()` join)
@@ -54,7 +72,7 @@ Each garbled variant is its own distinct normalized string, so the vote for the 
 | Chunks produced (fed into the fixed `chunk_document()`) | 1,160 (see Resolved #1) | 69 |
 | Chunks still containing boilerplate | many | 0 |
 
-See Open Issue #1 above for the one boilerplate element (watermark-contaminated `Address:` line) that still isn't caught.
+The watermark-contaminated `Address:` line mentioned as an open gap at the time was resolved shortly after — see Resolved Issue #3 above.
 
 ### 1. Chunk overlap bug — 18x too many chunks, near-duplicate content
 **Found:** 2026-08-22, during local chunking trial on `docs/30. CC&Rs (Required Civil Code Sec. 4525).pdf`
