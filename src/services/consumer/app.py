@@ -4,57 +4,118 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from pathlib import Path
 
-# RabbitMQ Configuration (from env vars)
-RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
-RABBITMQ_USER = os.getenv("RABBITMQ_USER", "default_user_jKPj7zmhwSN3JMMb5um")
-RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD", "_hiL6pXPY7ITdQKs9gxS_uw7HqNiBFj7")
-RABBITMQ_QUEUE = os.getenv("RABBITMQ_QUEUE", "test_queue")
-RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", "5672"))
+from src.config.settings import (
+    RABBITMQ_HOST,
+    RABBITMQ_PORT,
+    RABBITMQ_USER,
+    RABBITMQ_PASSWORD,
+    RABBITMQ_QUEUE,
+    CHUNKS_JSON_PATH,
+)
+from src.rag.extract import extract_document
+from src.rag.chunk import chunk_document, classify_doc_type
+from src.rag.status import write_status
+from src.rag.summarize import summarize_document
+import src.rag.store as store
 
 # Concurrency settings
 MAX_CONCURRENT_MESSAGES = 3
 executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_MESSAGES)
 channel_lock = threading.Lock()  # Thread-safe channel operations
+chunks_json_lock = threading.Lock()  # Thread-safe chunks.json append
+
+# Embed+store in batches so status.chunks_done reflects real progress
+# instead of jumping straight from 0 to chunks_total.
+EMBED_BATCH_SIZE = 16
+
+
+def _append_chunks_json(chunks: list[dict]) -> None:
+    """Append chunk records (no embeddings) to the debug/audit chunks.json.
+
+    Thread-safe: multiple documents can be processed concurrently
+    (MAX_CONCURRENT_MESSAGES), and this file is shared across all of them.
+    """
+    path = Path(CHUNKS_JSON_PATH)
+    with chunks_json_lock:
+        existing = []
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text())
+            except (json.JSONDecodeError, OSError):
+                existing = []
+        existing.extend(chunks)
+        path.write_text(json.dumps(existing, indent=2, ensure_ascii=False))
 
 
 def process_message(message_data, delivery_tag, channel):
-    """Process a single message (called in thread pool)"""
+    """Process a single uploaded document: extract -> chunk -> embed -> store -> summarize."""
+    thread_name = threading.current_thread().name
+    doc_id = message_data.get("doc_id")
+    file_path = message_data.get("file_path")
+    filename = message_data.get("original_filename", "unknown")
+
+    print(f"\n⏳ [Thread-{thread_name}] Processing message {delivery_tag}: {filename}")
+
     try:
-        print(f"\n⏳ [Thread-{threading.current_thread().name}] Processing message {delivery_tag}:")
-        print(json.dumps(message_data, indent=2))
+        if not file_path or not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
 
-        file_path = message_data.get('file_path')
-        filename = message_data.get('original_filename', 'unknown')
+        write_status(doc_id, filename, stage="extracting")
+        doc = extract_document(Path(file_path), strip_boilerplate=True)
+        print(f"  [Thread-{thread_name}] Extracted {doc['total_pages']} pages")
 
-        # PLACEHOLDER: Add your processing logic here
-        print(f"[TODO] Processing logic for: {filename}")
+        write_status(doc_id, filename, stage="chunking")
+        doc_type = classify_doc_type(filename)
+        is_ccrs = "CC&Rs" in filename
+        chunks = chunk_document(filename, doc["full_text"], doc["page_offsets"], is_ccrs=is_ccrs)
+        print(f"  [Thread-{thread_name}] Produced {len(chunks)} chunks (doc_type={doc_type})")
 
-        # Simulate processing time (replace with actual processing)
-        # time.sleep(2)
+        write_status(
+            doc_id, filename, stage="embedding",
+            doc_type=doc_type, chunks_total=len(chunks), chunks_done=0,
+        )
+        for i in range(0, len(chunks), EMBED_BATCH_SIZE):
+            batch = chunks[i : i + EMBED_BATCH_SIZE]
+            store.add_chunks(batch)
+            chunks_done = min(i + EMBED_BATCH_SIZE, len(chunks))
+            write_status(doc_id, filename, stage="embedding", chunks_done=chunks_done)
+            print(f"  [Thread-{thread_name}] Embedded {chunks_done}/{len(chunks)} chunks")
 
-        # Delete file from PVC after processing
-        if file_path:
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                    print(f"🗑️  Deleted file: {file_path}")
-                else:
-                    print(f"⚠️  File not found: {file_path}")
-            except Exception as e:
-                print(f"⚠️  Error deleting file {file_path}: {e}")
+        _append_chunks_json(chunks)
 
-        # Mark message as processed (acknowledge it) - thread-safe
+        write_status(doc_id, filename, stage="summarizing")
+        summary = summarize_document(doc_type, doc["full_text"])
+        if summary:
+            print(f"  [Thread-{thread_name}] Summary: {summary}")
+        else:
+            print(f"  [Thread-{thread_name}] Summary skipped (no LLM reachable)")
+
+        write_status(doc_id, filename, stage="ready", summary=summary)
+
+        # Delete file from PVC after successful processing
+        try:
+            os.remove(file_path)
+            print(f"  🗑️  [Thread-{thread_name}] Deleted file: {file_path}")
+        except OSError as e:
+            print(f"  ⚠️  [Thread-{thread_name}] Error deleting file {file_path}: {e}")
+
         with channel_lock:
             channel.basic_ack(delivery_tag=delivery_tag)
-        print(f"✓ [Thread-{threading.current_thread().name}] Message {delivery_tag} processed successfully")
+        print(f"✓ [Thread-{thread_name}] Message {delivery_tag} processed successfully — {filename} is ready")
 
     except Exception as e:
-        print(f"✗ [Thread-{threading.current_thread().name}] Error processing message {delivery_tag}: {e}")
-        # Reject message (it will be requeued) - thread-safe
+        print(f"✗ [Thread-{thread_name}] Error processing message {delivery_tag}: {e}")
+        if doc_id:
+            write_status(doc_id, filename, stage="error", error_message=str(e))
         with channel_lock:
-            channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+            # requeue=False: a processing failure (bad PDF, corrupt file, etc)
+            # is not transient - requeuing would just loop forever reprocessing
+            # the same broken message. Transient issues (connection loss) are
+            # handled separately by consume_messages()'s reconnect logic, not
+            # by nacking individual messages.
+            channel.basic_nack(delivery_tag=delivery_tag, requeue=False)
 
 
 def get_queue_message_count():
