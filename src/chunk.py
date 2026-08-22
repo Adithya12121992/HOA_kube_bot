@@ -23,7 +23,7 @@ CAPTIONS_PATH = Path("captions.json")
 
 # Chunking parameters
 TARGET_CHUNK_CHARS = 3200  # ~800 tokens at 4 chars/token
-PARAGRAPH_OVERLAP = 1  # Overlap in paragraphs between chunks
+OVERLAP_CHARS = 300  # Bounded char-budget overlap between consecutive chunks (~10% of target)
 TOC_REGION_FRACTION = 0.10  # Ignore section patterns in first 10% of doc
 
 # Regex patterns
@@ -112,24 +112,36 @@ def split_into_sentences(paragraph: str) -> list[str]:
 def chunks_from_paragraphs(
     paragraphs: list[str],
     char_offset: int = 0,
-    ignore_section_start: int = 0,
 ) -> list[tuple[str, int, int]]:
     """Create chunks from paragraphs, respecting overlap and target size.
+
+    Overlap is a bounded character budget (OVERLAP_CHARS) taken from the tail
+    of the just-finalized chunk, not a whole-paragraph rewind. This guarantees
+    every chunk advances by at least (TARGET_CHUNK_CHARS - OVERLAP_CHARS)
+    characters, regardless of how large or small the source paragraphs are —
+    a paragraph-count-based overlap could re-include an entire huge paragraph,
+    causing near-duplicate chunks that barely advance (or don't advance at all
+    when the whole document is a single paragraph, e.g. unstructured extracted
+    text with no real \n\n breaks).
 
     Args:
         paragraphs: List of paragraph texts (separated by original \n\n).
         char_offset: Starting character position in the full document.
-        ignore_section_start: Char position; don't split on sections before this.
 
     Returns:
         List of (chunk_text, char_start, char_end) tuples.
     """
     chunks = []
-    current_chunk_parts = []
+    current_chunk_parts: list[str] = []
     current_char_start = char_offset
     char_pos = char_offset
 
-    for para_idx, para in enumerate(paragraphs):
+    def current_len() -> int:
+        if not current_chunk_parts:
+            return 0
+        return sum(len(s) for s in current_chunk_parts) + (len(current_chunk_parts) - 1)
+
+    for para in paragraphs:
         if not para.strip():
             continue
 
@@ -138,24 +150,26 @@ def chunks_from_paragraphs(
 
         for sent in sentences:
             sent_len = len(sent)
-            current_len = sum(len(p) for p in current_chunk_parts) + sum(
-                len(s) for s in current_chunk_parts if current_chunk_parts
-            )
 
             # If adding this sentence would exceed target, finalize the chunk.
-            if current_len + sent_len > TARGET_CHUNK_CHARS and current_chunk_parts:
+            if current_chunk_parts and current_len() + 1 + sent_len > TARGET_CHUNK_CHARS:
                 chunk_text = " ".join(current_chunk_parts)
                 char_end = char_pos
                 chunks.append((chunk_text, current_char_start, char_end))
 
-                # Overlap: rewind to include last paragraph (or last 2 for longer chunks).
-                if para_idx > 0:
-                    overlap_text = " ".join(paragraphs[max(0, para_idx - PARAGRAPH_OVERLAP) : para_idx])
-                    current_chunk_parts = split_into_sentences(overlap_text)
-                    current_char_start = char_pos - len(overlap_text)
-                else:
-                    current_chunk_parts = []
-                    current_char_start = char_pos
+                # Bounded tail overlap: keep only the last OVERLAP_CHARS worth
+                # of sentences, not the whole preceding paragraph.
+                overlap_parts: list[str] = []
+                overlap_len = 0
+                for s in reversed(current_chunk_parts):
+                    added_len = len(s) + (1 if overlap_parts else 0)
+                    if overlap_len + added_len > OVERLAP_CHARS:
+                        break
+                    overlap_parts.insert(0, s)
+                    overlap_len += added_len
+
+                current_chunk_parts = overlap_parts
+                current_char_start = char_pos - overlap_len
 
             current_chunk_parts.append(sent)
             char_pos += sent_len + 1  # +1 for space
@@ -215,7 +229,6 @@ def chunk_document(
     base_chunks = chunks_from_paragraphs(
         paragraphs,
         char_offset=0,
-        ignore_section_start=ignore_section_until,
     )
 
     # Build chunk records with improved metadata.
