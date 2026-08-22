@@ -139,10 +139,10 @@ Migrate from Alpine to Slim Linux, add OCR capabilities, verify all dependencies
 ---
 
 # PHASE 2: Incremental Chunking & Embedding
-**Time:** 3 days | **Status:** Not started
+**Time:** 3.5 days | **Status:** Not started
 
 ## Goal
-Integrate chunking and embedding directly into consumer, handle PDFs incrementally without batch processing.
+Integrate chunking and embedding directly into consumer, handle PDFs incrementally without batch processing. Also surface live processing status per document (uploaded → extracting → chunking → embedding → storing → summarizing → ready) so the UI can tell the user when a doc is searchable, plus show a 2-line LLM-generated summary once ready.
 
 ### Step 2.1: Prepare Sample PDF Corpus
 **Time:** 1 day | **Checkpoint:** 5 sample PDFs ready
@@ -228,16 +228,27 @@ Current consumer.py flow:
 New flow should be:
   Read message
     ↓
-  Extract text from PDF (with OCR fallback)
+  [status: extracting] Extract text from PDF (with OCR fallback)
     ↓
-  CHUNK the text (use chunk.py logic)
+  [status: chunking] CHUNK the text (use chunk.py logic, strip headers/footers first)
     ↓
-  For each chunk created:
+  [status: embedding] For each chunk created:
     ├─ EMBED with BGE-small
     ├─ Append to chunks.json
-    ├─ Store in ChromaDB (local)
-    ├─ Store in Pinecone (if enabled)
+    ├─ Update status: chunks_done / chunks_total
     └─ Log progress
+    ↓
+  [status: storing] Store all chunks:
+    ├─ Write to ChromaDB (local environment)
+    └─ Write to Pinecone (cloud environment)
+    ↓
+  [status: summarizing] Generate 2-line doc summary:
+    ├─ Take first ~2000 chars of extracted text + doc_type
+    ├─ Call current environment's LLM (LM Studio locally, Claude→OpenAI in cloud)
+    ├─ Prompt: "Summarize this {doc_type} document in exactly 2 lines: {text}"
+    └─ Write summary into status file
+    ↓
+  [status: ready] Doc is now searchable
     ↓
   Delete file from PVC
     ↓
@@ -249,15 +260,68 @@ Key decisions to document:
 - How to handle chunking failures? (Log, continue, acknowledge anyway)
 - How to handle embedding failures? (Retry? Log? Continue?)
 - Batch size for embeddings? (Process chunks as they come, not in batches)
+- How to handle summary generation failures? (Log, skip summary, still mark `ready` — a missing summary should never block search)
 
 **Validation:**
 ```
 ✅ Flow documented
 ✅ Error handling strategy decided
 ✅ Edge cases identified
+✅ Status stages defined end-to-end (uploaded → ready)
 ```
 
-### Step 2.5: Audit Current chunk.py for Reusability
+### Step 2.5: Design Status Tracking (Upload Progress + Summary)
+**Time:** 4 hours | **Checkpoint:** Status schema + API documented
+
+**Problem:** `consumer` and `hoa-bot` run in separate pods with no shared memory, but both already mount the same PVC (`/data`). Use that as the shared status channel — no new infrastructure needed.
+
+Document the design in `status_tracking_design.md`:
+```
+Status file: /data/status/{doc_id}.json
+
+Schema:
+{
+  "doc_id": "uuid",
+  "filename": "CC&Rs.pdf",
+  "stage": "uploaded" | "extracting" | "chunking" | "embedding"
+          | "storing" | "summarizing" | "ready" | "error",
+  "doc_type": "governing" | "financial" | "inspection" | "disclosure" | "minutes" | null,
+  "chunks_total": 42,
+  "chunks_done": 18,
+  "summary": "2-line summary text, populated once stage=ready",
+  "error_message": null,
+  "updated_at": "2026-08-22T13:00:00Z"
+}
+
+Write side (consumer):
+├─ Writes/overwrites this file at the start of each stage transition
+└─ On exception, writes stage="error" with error_message, still acks the message
+
+Read side (hoa-bot service):
+└─ New endpoint: GET /status/{doc_id}
+   ├─ Reads /data/status/{doc_id}.json
+   └─ Returns 404 if file doesn't exist yet (race: upload accepted, consumer hasn't started)
+
+Frontend (Upload tab):
+├─ After successful POST /admin/upload, start polling GET /status/{doc_id} every ~1.5s
+├─ Render stage progression as a checklist:
+│    ✓ Extracted   ✓ Chunked   ⏳ Embedding (18/42)   Storing   Summarizing   Ready
+├─ On stage="ready":
+│    ├─ Stop polling
+│    ├─ Show the 2-line summary
+│    └─ Show: "✅ You can now ask questions about this doc" (chat stays global search — no per-doc scoping)
+└─ On stage="error": show error_message, stop polling
+```
+
+**Validation:**
+```
+✅ Status file schema defined
+✅ No new infrastructure required (reuses existing shared PVC)
+✅ Race condition handled (404 before consumer starts)
+✅ Error path defined (doesn't block other docs, doesn't hang polling forever)
+```
+
+### Step 2.6: Audit Current chunk.py for Reusability
 **Time:** 4 hours | **Checkpoint:** Reusable functions identified
 
 - [ ] Read current chunk.py
@@ -282,9 +346,9 @@ Key decisions to document:
 ✅ No circular dependencies
 ```
 
-**End of Phase 2:** Consumer ready to do chunking + embedding incrementally  
-**Checkpoint:** Sample PDFs, chunks.json structure, utils ready  
-**Commit to Git:** "Add sample data, prepare incremental chunking infrastructure"
+**End of Phase 2:** Consumer ready to do chunking + embedding incrementally, with live per-doc status tracking and an LLM-generated 2-line summary once ready  
+**Checkpoint:** Sample PDFs, chunks.json structure, status file schema, utils ready  
+**Commit to Git:** "Add sample data, incremental chunking infrastructure, and upload status tracking"
 
 ---
 
