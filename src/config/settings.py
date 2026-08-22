@@ -6,6 +6,13 @@ Manages all toggles and fixed settings
 import os
 from typing import Literal
 
+from dotenv import load_dotenv
+
+# Loads .env into the process environment if present (local dev only — in
+# K8s, real env vars/secrets are already set and this is a no-op since
+# load_dotenv() doesn't override existing env vars by default).
+load_dotenv()
+
 # ============================================================================
 # USER-TOGGLED SETTINGS (changeable via UI)
 # ============================================================================
@@ -53,6 +60,7 @@ MIN_CHUNK_SIZE = 100
 CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", ".chroma_data")
 LM_STUDIO_BASE_URL = os.getenv("LM_STUDIO_BASE_URL", "http://localhost:1234/v1")
 LM_STUDIO_MODEL = os.getenv("LM_STUDIO_MODEL", "local-model")
+LM_STUDIO_API_KEY = os.getenv("LM_STUDIO_API_KEY", "")  # LM Studio can require a Bearer token
 
 # --- Cloud environment ---
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
@@ -60,6 +68,8 @@ PINECONE_INDEX_NAME = "hoa-documents"
 PINECONE_ENVIRONMENT = "gcp-starter"
 
 MEM0_API_KEY = os.getenv("MEM0_API_KEY", "")
+
+LLAMA_CLOUD_API_KEY = os.getenv("LLAMA_CLOUD_API_KEY", "")  # LlamaIndex (cloud rag_framework)
 
 # LLM fallback chain for cloud mode: try Claude first, fall back to OpenAI
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
