@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>HOA Bot</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161922;
+    --border: #262b38;
+    --text: #e6e8ee;
+    --muted: #8b93a7;
+    --accent: #4f8cff;
+    --accent-dim: #2b4d8a;
+    --good: #35c98f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .config-badge {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 4px 10px;
+  }
+  .tabs {
+    display: flex;
+    gap: 4px;
+    padding: 10px 20px 0;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .tab-btn {
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    padding: 10px 16px;
+    font-size: 14px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+  }
+  .tab-btn.active {
+    color: var(--text);
+    border-bottom: 2px solid var(--accent);
+  }
+  .layout {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+  }
+  .sidebar {
+    width: 220px;
+    border-right: 1px solid var(--border);
+    background: var(--panel);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .sidebar h3 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    margin: 0 0 8px;
+  }
+  .toggle-group { display: flex; flex-direction: column; gap: 6px; }
+  .toggle-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .toggle-option:hover { background: #1d212c; }
+  .toggle-option input { accent-color: var(--accent); }
+  main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .panel { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+  .panel.active { display: flex; }
+
+  /* Chat panel (placeholder / disabled) */
+  #chat-panel .messages {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-size: 14px;
+    text-align: center;
+    padding: 20px;
+  }
+  #chat-panel .composer {
+    display: flex;
+    gap: 10px;
+    padding: 16px 20px;
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+  }
+  #chat-panel input[type="text"] {
+    flex: 1;
+    background: #0c0e13;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--muted);
+    font-size: 14px;
+  }
+  #chat-panel input[disabled] { cursor: not-allowed; }
+  #chat-panel button {
+    background: var(--accent-dim);
+    color: #aebfe0;
+    border: none;
+    border-radius: 8px;
+    padding: 0 18px;
+    font-size: 14px;
+    cursor: not-allowed;
+  }
+
+  /* Upload panel */
+  #upload-panel { padding: 24px; overflow-y: auto; }
+  .dropzone {
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    padding: 40px;
+    text-align: center;
+    color: var(--muted);
+    margin-bottom: 20px;
+  }
+  .dropzone.dragover { border-color: var(--accent); color: var(--text); }
+  #file-input { display: none; }
+  .btn {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .btn:hover { opacity: 0.9; }
+  #upload-status { margin-top: 16px; font-size: 13px; color: var(--muted); }
+  .upload-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 10px 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+  .upload-item.success { border-color: var(--good); }
+  .upload-item.error { border-color: #e05a5a; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>HOA Bot</h1>
+  <span class="config-badge" id="config-badge">loading config...</span>
+</header>
+
+<div class="tabs">
+  <button class="tab-btn active" data-tab="chat">Chat</button>
+  <button class="tab-btn" data-tab="upload">Upload</button>
+</div>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div>
+      <h3>Environment</h3>
+      <div class="toggle-group" id="environment-toggle">
+        <label class="toggle-option">
+          <input type="radio" name="environment" value="local" checked />
+          Local (ChromaDB + LM Studio)
+        </label>
+        <label class="toggle-option">
+          <input type="radio" name="environment" value="cloud" />
+          Cloud (Pinecone + Claude/GPT)
+        </label>
+      </div>
+    </div>
+    <div>
+      <h3>Retrieval Mode</h3>
+      <div class="toggle-group" id="retrieval-toggle">
+        <label class="toggle-option">
+          <input type="radio" name="retrieval_mode" value="fast" checked />
+          Fast
+        </label>
+        <label class="toggle-option">
+          <input type="radio" name="retrieval_mode" value="thinking" />
+          Thinking
+        </label>
+      </div>
+    </div>
+  </aside>
+
+  <main>
+    <section id="chat-panel" class="panel active">
+      <div class="messages">
+        Chat is coming soon.<br />
+        The RAG engine is being built in later phases — this tab is a placeholder.
+      </div>
+      <div class="composer">
+        <input type="text" placeholder="Chat will be enabled after Phase 2+" disabled />
+        <button disabled>Send</button>
+      </div>
+    </section>
+
+    <section id="upload-panel" class="panel">
+      <div class="dropzone" id="dropzone">
+        Drag & drop a PDF here, or
+        <br /><br />
+        <button class="btn" id="browse-btn">Choose File</button>
+        <input type="file" id="file-input" accept="application/pdf" />
+      </div>
+      <div id="upload-status"></div>
+      <div id="upload-history"></div>
+    </section>
+  </main>
+</div>
+
+<script>
+  // Tab switching
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+      document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
+      btn.classList.add("active");
+      document.getElementById(btn.dataset.tab + "-panel").classList.add("active");
+    });
+  });
+
+  // Config load/update
+  async function getConfig() {
+    const res = await fetch("/config");
+    const config = await res.json();
+    document.getElementById("config-badge").textContent =
+      `${config.environment} • ${config.retrieval_mode}`;
+    document.querySelector(`input[name="environment"][value="${config.environment}"]`).checked = true;
+    document.querySelector(`input[name="retrieval_mode"][value="${config.retrieval_mode}"]`).checked = true;
+  }
+
+  async function updateConfig(partial) {
+    const res = await fetch("/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(partial),
+    });
+    const data = await res.json();
+    document.getElementById("config-badge").textContent =
+      `${data.config.environment} • ${data.config.retrieval_mode}`;
+  }
+
+  document.querySelectorAll('input[name="environment"]').forEach((el) => {
+    el.addEventListener("change", (e) => updateConfig({ environment: e.target.value }));
+  });
+  document.querySelectorAll('input[name="retrieval_mode"]').forEach((el) => {
+    el.addEventListener("change", (e) => updateConfig({ retrieval_mode: e.target.value }));
+  });
+
+  getConfig();
+
+  // Upload
+  const dropzone = document.getElementById("dropzone");
+  const fileInput = document.getElementById("file-input");
+  const browseBtn = document.getElementById("browse-btn");
+  const uploadStatus = document.getElementById("upload-status");
+  const uploadHistory = document.getElementById("upload-history");
+
+  browseBtn.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", (e) => {
+    if (e.target.files.length) uploadFile(e.target.files[0]);
+  });
+
+  ["dragover", "dragenter"].forEach((evt) =>
+    dropzone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      dropzone.classList.add("dragover");
+    })
+  );
+  ["dragleave", "drop"].forEach((evt) =>
+    dropzone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      dropzone.classList.remove("dragover");
+    })
+  );
+  dropzone.addEventListener("drop", (e) => {
+    const file = e.dataTransfer.files[0];
+    if (file) uploadFile(file);
+  });
+
+  async function uploadFile(file) {
+    uploadStatus.textContent = `Uploading ${file.name}...`;
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const res = await fetch("/admin/upload", { method: "POST", body: formData });
+      const data = await res.json();
+      if (res.ok) {
+        uploadStatus.textContent = "";
+        addHistoryItem(data.filename, data.doc_id, true);
+      } else {
+        uploadStatus.textContent = "";
+        addHistoryItem(file.name, data.detail || "Upload failed", false);
+      }
+    } catch (err) {
+      uploadStatus.textContent = "";
+      addHistoryItem(file.name, err.message, false);
+    }
+  }
+
+  function addHistoryItem(filename, detail, success) {
+    const item = document.createElement("div");
+    item.className = "upload-item " + (success ? "success" : "error");
+    item.innerHTML = `<span>${filename}</span><span>${success ? "✓ queued" : "✗ " + detail}</span>`;
+    uploadHistory.prepend(item);
+  }
+</script>
+
+</body>
+</html>

@@ -16,16 +16,16 @@ spec:
         app: hoa-bot
     spec:
       containers:
-      - name: chatbot
-        image: chatbot:latest
+      - name: hoa-bot
+        image: hoa-bot:latest
         imagePullPolicy: Never
         ports:
         - containerPort: 8000
           name: http
         env:
         # Configuration toggles
-        - name: STORAGE_MODE
-          value: "local"  # "local" or "hybrid"
+        - name: ENVIRONMENT
+          value: "local"  # "local" or "cloud" - each is a full bundled stack
         - name: RETRIEVAL_MODE
           value: "fast"   # "fast" or "thinking"
         # RabbitMQ (for consumer coordination)
@@ -45,18 +45,40 @@ spec:
               key: password
         - name: RABBITMQ_QUEUE
           value: "test_queue"
-        # Storage
+        # --- Local environment stack ---
         - name: CHROMA_DB_PATH
           value: "/data/.chroma_data"
         - name: DATA_DIR
           value: "/data"
-        # Pinecone (if hybrid mode enabled)
+        - name: LM_STUDIO_BASE_URL
+          value: "http://host.k3d.internal:1234/v1"  # LM Studio runs on host machine
+        - name: LM_STUDIO_MODEL
+          value: "local-model"
+        # --- Cloud environment stack (only needed when ENVIRONMENT=cloud) ---
         - name: PINECONE_API_KEY
           valueFrom:
             secretKeyRef:
               name: pinecone-secret
               key: api-key
-              optional: true  # Optional if using local mode only
+              optional: true
+        - name: MEM0_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: mem0-secret
+              key: api-key
+              optional: true
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-secret
+              key: anthropic-api-key
+              optional: true
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-secret
+              key: openai-api-key
+              optional: true
         - name: LOG_LEVEL
           value: "INFO"
         volumeMounts:

@@ -288,111 +288,132 @@ Key decisions to document:
 
 ---
 
-# PHASE 3: Dual Storage (ChromaDB + Pinecone)
-**Time:** 2 days | **Status:** Not started
+# PHASE 3: Environment Bundles (Local Stack + Cloud Stack)
+**Time:** 3 days | **Status:** Not started
 
 ## Goal
-Abstract vector DB layer so consumer can write to both simultaneously.
+Build two fully swappable stacks behind one `environment` toggle — not independent pieces, but complete bundles:
 
-### Step 3.1: Create Vector DB Abstraction (Document structure)
+```
+"local" bundle:                      "cloud" bundle:
+├─ Storage:      ChromaDB            ├─ Storage:      Pinecone
+├─ LLM:          LM Studio           ├─ LLM:          Claude → OpenAI (fallback)
+├─ RAG framework: LangGraph          ├─ RAG framework: LlamaIndex
+└─ Memory:       Simple session      └─ Memory:       Mem0
+```
+
+Retrieval mode (`fast` / `thinking`) is a second, independent toggle that layers on top of either bundle.
+
+### Step 3.1: Create Storage + RAG Framework Abstraction
 **Time:** 1 day | **Checkpoint:** Architecture documented
 
-Create a file `vector_db_architecture.md` (documentation, not code yet):
+Create a file `vector_db_architecture.md`:
 
 Document the abstraction:
 ```
-Abstract Interface (what any vector DB must support):
+Abstract Storage Interface (what any vector DB must support):
 ├─ add_embeddings(chunk_id, vector, metadata)
-│  └─ Write a single embedding to the DB
 ├─ search(query_vector, k=8)
-│  └─ Search for top-k similar vectors
 ├─ delete_all()
-│  └─ Clear the database
 └─ health_check()
-   └─ Verify DB is responsive
 
-ChromaDB Implementation:
+ChromaDB Implementation (local bundle):
 ├─ Uses: .chroma_data/ folder (local files)
-├─ Interface:
-│  ├─ add: Uses collection.upsert()
-│  ├─ search: Uses collection.query()
-│  └─ delete: Uses client.delete_collection()
+├─ add: collection.upsert()
+├─ search: collection.query()
+└─ delete: client.delete_collection()
 
-Pinecone Implementation:
-├─ Uses: Pinecone API (cloud)
-├─ Interface:
-│  ├─ add: Uses index.upsert()
-│  ├─ search: Uses index.query()
-│  └─ delete: Uses index.delete()
+Pinecone Implementation (cloud bundle):
+├─ Uses: Pinecone API
+├─ add: index.upsert()
+├─ search: index.query()
+└─ delete: index.delete()
 
-Configuration:
-├─ Toggle in config which to use (or both)
-├─ Both get same data simultaneously
-└─ At query time, choose which to search
+RAG Framework Selection (bundled with environment, not independently toggled):
+├─ local  → LangGraph graph (retrieve → grade → rewrite → generate)
+└─ cloud  → LlamaIndex query engine (equivalent pipeline, cloud-native)
+
+Memory Selection (bundled with environment):
+├─ local  → Simple in-memory session dict
+└─ cloud  → Mem0 (persistent, cross-session memory)
 ```
 
 **Validation:**
 ```
-✅ Abstract interface defined
-✅ Both implementations mapped
-✅ No conflicts between interfaces
+✅ Storage interface defined for both backends
+✅ RAG framework mapped per bundle (LangGraph / LlamaIndex)
+✅ Memory backend mapped per bundle (Simple / Mem0)
+✅ No mixing across bundles (local never touches Pinecone/Mem0/cloud LLM)
 ```
 
-### Step 3.2: Prepare Pinecone Setup (Document requirements)
-**Time:** 1 day | **Checkpoint:** Pinecone account ready
+### Step 3.2: Prepare Cloud Service Accounts (Pinecone + Mem0 + LLM keys)
+**Time:** 1 day | **Checkpoint:** All cloud credentials ready
 
-- [ ] Go to pinecone.io
-- [ ] Create free account (if not already done)
-- [ ] Create index:
-  - [ ] Name: `hoa-documents`
-  - [ ] Dimension: `384` (matches BGE-small output)
-  - [ ] Metric: `cosine`
-  - [ ] Environment: `gcp-starter` (free tier)
-- [ ] Copy API key
-- [ ] Store in environment variable: `PINECONE_API_KEY`
-- [ ] Document in a file `pinecone_setup.txt`:
-  ```
-  Pinecone Index Created:
-  - Name: hoa-documents
-  - Dimension: 384
-  - Metric: cosine
-  - Free tier: supports up to 1M vectors
-  - Cost: $0 for free tier
-  - API Key stored in: $PINECONE_API_KEY
+- [ ] **Pinecone**
+  - [ ] Create account at pinecone.io (free tier)
+  - [ ] Create index: name `hoa-documents`, dimension `384`, metric `cosine`
+  - [ ] Copy API key → `PINECONE_API_KEY`
+- [ ] **Mem0**
+  - [ ] Create account at mem0.ai (or self-host if preferred)
+  - [ ] Copy API key → `MEM0_API_KEY`
+- [ ] **LLM keys (fallback chain: Claude first, OpenAI second)**
+  - [ ] Anthropic API key → `ANTHROPIC_API_KEY`
+  - [ ] OpenAI API key → `OPENAI_API_KEY`
+  - [ ] Document fallback logic: try Claude, on failure/timeout/rate-limit → retry with OpenAI
+- [ ] Store all in K8s secrets (not committed to git):
+  ```bash
+  kubectl create secret generic pinecone-secret --from-literal=api-key=<key> -n hoa-pipeline
+  kubectl create secret generic mem0-secret --from-literal=api-key=<key> -n hoa-pipeline
+  kubectl create secret generic llm-secret \
+    --from-literal=anthropic-api-key=<key> \
+    --from-literal=openai-api-key=<key> \
+    -n hoa-pipeline
   ```
 
 **Validation:**
 ```
-✅ Pinecone account created
-✅ Index created
-✅ API key accessible
-✅ Can connect via Python SDK
+✅ Pinecone index created, API key stored as K8s secret
+✅ Mem0 account created, API key stored as K8s secret
+✅ Anthropic + OpenAI keys stored as K8s secret
+✅ No keys committed to git
 ```
 
-### Step 3.3: Document Config Structure
+### Step 3.3: Prepare LM Studio (Local LLM)
+**Time:** 4 hours | **Checkpoint:** LM Studio serving locally
+
+- [ ] Install LM Studio (lmstudio.ai)
+- [ ] Download a local model (e.g., Llama 3 8B, Mistral 7B — pick based on RAM available)
+- [ ] Start LM Studio's local server (OpenAI-compatible API, default `http://localhost:1234/v1`)
+- [ ] Verify from host: `curl http://localhost:1234/v1/models`
+- [ ] Verify from inside k3d cluster (uses `host.k3d.internal` to reach host machine):
+  ```bash
+  kubectl -n hoa-pipeline run curltest --image=curlimages/curl --rm -i --restart=Never -- \
+    curl http://host.k3d.internal:1234/v1/models
+  ```
+
+**Validation:**
+```
+✅ LM Studio running with a loaded model
+✅ Reachable from host machine
+✅ Reachable from inside k3d cluster via host.k3d.internal
+```
+
+### Step 3.4: Document Config Structure
 **Time:** 1 hour | **Checkpoint:** Config file structure finalized
 
-Create a file `config_structure.md` (documentation):
-
-Document the configuration:
+Already implemented in `src/config/settings.py`. Document the final structure:
 ```
-config.py should support:
-
 User-Toggled Settings (2 only):
-├─ storage_mode: "local" | "hybrid"
-│  ├─ local: ChromaDB only
-│  └─ hybrid: ChromaDB + Pinecone (dual-write, then query local by default)
+├─ environment: "local" | "cloud"
+│  ├─ local: ChromaDB + LM Studio + LangGraph + Simple memory
+│  └─ cloud: Pinecone + Claude→OpenAI + LlamaIndex + Mem0
 │
 └─ retrieval_mode: "fast" | "thinking"
    ├─ fast: Direct retrieval → generate (2-5s)
    └─ thinking: Retrieve → grade → rewrite → generate (10-30s)
 
 Fixed/Non-Toggled Config:
-├─ Pinecone:
-│  ├─ pinecone_api_key: from environment
-│  └─ pinecone_index_name: "hoa-documents"
-│
-├─ Embedding:
+├─ Embedding (same for both bundles, always local, no API key):
 │  ├─ embedding_model: "BAAI/bge-small-en-v1.5"
 │  ├─ embedding_dimension: 384
 │  └─ embedding_batch_size: 32
@@ -402,6 +423,18 @@ Fixed/Non-Toggled Config:
 │  ├─ overlap: 1
 │  └─ min_chunk_size: 100
 │
+├─ Local bundle credentials:
+│  ├─ chroma_db_path
+│  ├─ lm_studio_base_url
+│  └─ lm_studio_model
+│
+├─ Cloud bundle credentials:
+│  ├─ pinecone_api_key, pinecone_index_name
+│  ├─ mem0_api_key
+│  ├─ anthropic_api_key, anthropic_model
+│  ├─ openai_api_key, openai_model
+│  └─ cloud_llm_fallback_order: ["anthropic", "openai"]
+│
 └─ Application:
    ├─ app_name: "HOA Bot"
    ├─ log_level: "INFO"
@@ -410,15 +443,15 @@ Fixed/Non-Toggled Config:
 
 **Validation:**
 ```
-✅ Config structure finalized
-✅ Only 2 user toggles
+✅ Config structure finalized (already live in settings.py)
+✅ Only 2 user toggles, each bundle fully self-contained
 ✅ Fixed config documented
-✅ Defaults reasonable
+✅ No API keys required for local bundle
 ```
 
-**End of Phase 3:** Dual storage architecture designed  
-**Checkpoint:** Pinecone ready, config structure finalized  
-**Commit to Git:** "Add architecture docs for dual vector DB storage and config structure"
+**End of Phase 3:** Both environment bundles designed and credentialed  
+**Checkpoint:** Pinecone + Mem0 + Claude/OpenAI keys ready, LM Studio serving locally, config live  
+**Commit to Git:** "Add environment bundle architecture (local: ChromaDB/LM Studio/LangGraph, cloud: Pinecone/Claude-GPT/LlamaIndex/Mem0)"
 
 ---
 
@@ -604,10 +637,11 @@ Unified HOA Bot Service (Chat + Upload):
 │  ├─ .chroma_data/ (ChromaDB persistent)                   │
 │  └─ /data (shared PVC for uploaded PDFs)                  │
 │                                                             │
-│  Environment:                                               │
-│  ├─ STORAGE_MODE: "local" or "hybrid"                     │
-│  ├─ RETRIEVAL_MODE: "fast" or "thinking"                 │
-│  └─ PINECONE_API_KEY (if hybrid mode)                     │
+│  Environment toggle (each = full bundled stack, see Phase 3):│
+│  ├─ ENVIRONMENT: "local" or "cloud"                        │
+│  │   local → ChromaDB + LM Studio + LangGraph + Simple mem │
+│  │   cloud → Pinecone + Claude→OpenAI + LlamaIndex + Mem0  │
+│  └─ RETRIEVAL_MODE: "fast" or "thinking" (independent)     │
 └─────────────────────────────────────────────────────────────┘
 
 User Flow:
@@ -615,7 +649,7 @@ User Flow:
 2. Two tabs available: "Chat" and "Upload"
 3. Chat tab: Ask questions, see answers
 4. Upload tab: Upload PDFs, see upload history
-5. Toggle config (storage + retrieval mode) in either tab
+5. Toggle config (environment + retrieval mode) in either tab
 ```
 
 **Validation:**
@@ -630,73 +664,42 @@ User Flow:
 ### Step 5.2: Design FastAPI Service (Code skeleton)
 **Time:** 2 hours | **Checkpoint:** API code structure documented
 
-Create a file `chatbot_service.py` (skeleton, not full implementation):
+**Already implemented** in `src/services/chatbot/service.py` — imports config from `src/config/settings.py` (`environment` + `retrieval_mode` toggles) rather than an in-memory dict, and is deployed/verified as of Phase 1 cleanup.
 
-Document the structure:
+Endpoints (live in code):
+
 ```python
-from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-import json
-
-app = FastAPI()
-
-# In-memory config (persisted in environment at startup)
-config = {
-    "storage_mode": "local",      # "local" or "hybrid"
-    "retrieval_mode": "fast"      # "fast" or "thinking"
-}
-
-# Endpoints:
-
 @app.get("/")
 async def serve_ui():
     """Serve index.html chatbot UI"""
-    return FileResponse("static/index.html")
+    return FileResponse("src/services/chatbot/static/index.html")
 
 @app.get("/config")
 async def get_config():
-    """Return current config"""
-    return config
+    """Return current config (environment + retrieval_mode + resolved stack)"""
+    return get_config_dict()
 
 @app.post("/config")
-async def update_config(new_config: dict):
-    """Update config toggles"""
-    global config
-    config.update(new_config)
-    return {"status": "updated", "config": config}
+async def update_config_endpoint(config: ConfigUpdate):
+    """Update environment / retrieval_mode toggles"""
+    new_config = update_config(environment=config.environment, retrieval_mode=config.retrieval_mode)
+    return {"status": "updated", "config": new_config}
 
 @app.post("/ask")
-async def ask_question(request: dict):
+async def ask_question(request: AskRequest) -> AskResponse:
     """
     Main endpoint: answer a question using RAG
-    
-    Input: {"question": "..."}
-    
+
     Flow:
-    1. Get current config
-    2. Instantiate RAG engine with config
+    1. Get current config (environment bundle + retrieval mode)
+    2. Instantiate RAG engine for that bundle:
+       - local: LangGraph + ChromaDB + LM Studio
+       - cloud: LlamaIndex + Pinecone + Mem0 + Claude (fallback: OpenAI)
     3. Run retrieve → [grade → rewrite if thinking] → generate
     4. Return answer + sources + metadata
     """
-    question = request["question"]
-    
-    # TODO: Import and instantiate RAG engine with config
-    # rag_engine = RAGEngine(
-    #     storage_mode=config["storage_mode"],
-    #     retrieval_mode=config["retrieval_mode"]
-    # )
-    # answer, sources, metadata = rag_engine.query(question)
-    
-    return {
-        "answer": "...",
-        "sources": [...],
-        "config_used": config,
-        "metadata": {
-            "latency_ms": 4200,
-            "chunks_searched": 8
-        }
-    }
+    # TODO (Phase 2+): wire up real RAG engine, currently returns placeholder
+    ...
 
 @app.get("/health")
 async def health_check():
@@ -767,10 +770,10 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
     - [ ] Upload status + progress
     - [ ] Upload history
   - [ ] Sidebar (on both tabs):
-    - [ ] Storage mode toggle (local/hybrid)
+    - [ ] Environment toggle (local: ChromaDB+LM Studio / cloud: Pinecone+Claude-GPT)
     - [ ] Retrieval mode toggle (fast/thinking)
     - [ ] Status badges
-    - [ ] Config display ("Local • Fast")
+    - [ ] Config display ("local • fast")
   - [ ] JavaScript functions:
     - [ ] `getConfig()` - fetch config on load
     - [ ] `updateConfig()` - POST /config when toggles change

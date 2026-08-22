@@ -16,7 +16,7 @@ import uuid
 import pika
 
 from src.config.settings import (
-    STORAGE_MODE, RETRIEVAL_MODE, get_config_dict, update_config,
+    ENVIRONMENT, RETRIEVAL_MODE, get_config_dict, update_config,
     RABBITMQ_HOST, RABBITMQ_PORT, RABBITMQ_USER, RABBITMQ_PASSWORD,
     RABBITMQ_QUEUE, DATA_DIR
 )
@@ -29,7 +29,7 @@ app = FastAPI(title="HOA Bot", version="1.0.0")
 # ============================================================================
 
 class ConfigUpdate(BaseModel):
-    storage_mode: Optional[str] = None
+    environment: Optional[str] = None
     retrieval_mode: Optional[str] = None
 
 
@@ -73,7 +73,7 @@ async def get_config():
 async def update_config_endpoint(config: ConfigUpdate):
     """Update configuration toggles"""
     new_config = update_config(
-        storage_mode=config.storage_mode,
+        environment=config.environment,
         retrieval_mode=config.retrieval_mode,
     )
     return {"status": "updated", "config": new_config}
@@ -85,8 +85,10 @@ async def ask_question(request: AskRequest) -> AskResponse:
     Answer a question using RAG
 
     Flow:
-    1. Load current config
-    2. Instantiate RAG engine
+    1. Load current config (environment bundle + retrieval mode)
+    2. Instantiate RAG engine for that bundle:
+       - local:  LangGraph + ChromaDB + LM Studio
+       - cloud:  LlamaIndex + Pinecone + Mem0 + Claude (fallback: OpenAI)
     3. Run retrieve → [grade → rewrite if thinking] → generate
     4. Return answer + sources + metadata
     """
@@ -95,7 +97,7 @@ async def ask_question(request: AskRequest) -> AskResponse:
     # TODO: Import RAG engine and run pipeline
     # from src.rag.pipeline import RAGEngine
     # rag = RAGEngine(
-    #     storage_mode=STORAGE_MODE,
+    #     environment=ENVIRONMENT,
     #     retrieval_mode=RETRIEVAL_MODE
     # )
     # answer, sources, metadata = rag.query(request.question)
