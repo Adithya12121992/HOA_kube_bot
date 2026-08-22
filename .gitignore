@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+
+# macOS
+.DS_Store
+
+# Local runtime data (Phase 2+)
+.chroma_data/
+chunks.json
+data/status/
+*.log
+
+# Environment / secrets
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
