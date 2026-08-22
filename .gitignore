@@ -15,6 +15,7 @@ venv/
 .chroma_data/
 chunks.json
 data/status/
+local_test_data/
 *.log
 
 # Environment / secrets
