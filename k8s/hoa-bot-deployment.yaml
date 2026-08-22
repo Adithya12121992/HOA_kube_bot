@@ -1,19 +1,19 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: chatbot
+  name: hoa-bot
   namespace: hoa-pipeline
   labels:
-    app: chatbot
+    app: hoa-bot
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: chatbot
+      app: hoa-bot
   template:
     metadata:
       labels:
-        app: chatbot
+        app: hoa-bot
     spec:
       containers:
       - name: chatbot
@@ -91,10 +91,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: chatbot-service
+  name: hoa-bot-service
   namespace: hoa-pipeline
   labels:
-    app: chatbot
+    app: hoa-bot
 spec:
   type: ClusterIP
   ports:
@@ -103,4 +103,4 @@ spec:
     protocol: TCP
     name: http
   selector:
-    app: chatbot
+    app: hoa-bot

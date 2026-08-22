@@ -1,18 +1,27 @@
 """
-FastAPI Chatbot Service
-REST API with HTML/JS frontend for RAG question-answering
+HOA Bot - FastAPI Service
+Unified interface for chatbot (Q&A) and file upload (admin)
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
 import time
+import os
+import json
+from datetime import datetime, timezone
+import uuid
+import pika
 
-from src.config.settings import STORAGE_MODE, RETRIEVAL_MODE, get_config_dict, update_config
+from src.config.settings import (
+    STORAGE_MODE, RETRIEVAL_MODE, get_config_dict, update_config,
+    RABBITMQ_HOST, RABBITMQ_PORT, RABBITMQ_USER, RABBITMQ_PASSWORD,
+    RABBITMQ_QUEUE, DATA_DIR
+)
 
-app = FastAPI(title="HOA Bot Chatbot", version="1.0.0")
+app = FastAPI(title="HOA Bot", version="1.0.0")
 
 
 # ============================================================================
@@ -36,13 +45,21 @@ class AskResponse(BaseModel):
     metadata: dict
 
 
+class UploadResponse(BaseModel):
+    status: str
+    doc_id: str
+    filename: str
+    file_path: str
+    uploaded_at: str
+
+
 # ============================================================================
-# ENDPOINTS
+# ENDPOINTS - CHAT
 # ============================================================================
 
 @app.get("/")
 async def serve_ui():
-    """Serve the chatbot HTML interface"""
+    """Serve the unified HTML interface (chat + upload tabs)"""
     return FileResponse("src/services/chatbot/static/index.html")
 
 
@@ -99,6 +116,82 @@ async def ask_question(request: AskRequest) -> AskResponse:
         },
     )
 
+
+# ============================================================================
+# ENDPOINTS - FILE UPLOAD (Admin)
+# ============================================================================
+
+@app.post("/admin/upload")
+async def upload_file(file: UploadFile = File(...)) -> UploadResponse:
+    """
+    Upload a PDF file and queue it for processing
+
+    Admin endpoint - processes file and sends message to RabbitMQ queue
+    for consumer to process (chunk, embed, store)
+    """
+    try:
+        # Ensure data directory exists
+        os.makedirs(DATA_DIR, exist_ok=True)
+
+        # Generate doc_id and file path
+        doc_id = str(uuid.uuid4())
+        filename = file.filename or "document.pdf"
+        file_path = os.path.join(DATA_DIR, f"{doc_id}_{filename}")
+
+        # Save file to disk
+        with open(file_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+
+        # Create RabbitMQ message
+        timestamp = datetime.now(timezone.utc).isoformat()
+        message = {
+            "doc_id": doc_id,
+            "original_filename": filename,
+            "file_path": file_path,
+            "uploaded_at": timestamp,
+        }
+
+        # Send to RabbitMQ queue
+        try:
+            credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
+            connection = pika.BlockingConnection(
+                pika.ConnectionParameters(
+                    host=RABBITMQ_HOST,
+                    port=RABBITMQ_PORT,
+                    credentials=credentials,
+                    connection_attempts=3,
+                    retry_delay=2,
+                )
+            )
+            channel = connection.channel()
+            channel.queue_declare(queue=RABBITMQ_QUEUE, durable=True)
+            channel.basic_publish(
+                exchange="",
+                routing_key=RABBITMQ_QUEUE,
+                body=json.dumps(message),
+                properties=pika.BasicProperties(delivery_mode=2),
+            )
+            connection.close()
+        except Exception as e:
+            # File saved but queue failed - still return success (file is persisted)
+            print(f"⚠️  RabbitMQ error: {e}, but file saved to {file_path}")
+
+        return UploadResponse(
+            status="success",
+            doc_id=doc_id,
+            filename=filename,
+            file_path=file_path,
+            uploaded_at=timestamp,
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+# ============================================================================
+# HEALTH CHECK
+# ============================================================================
 
 @app.get("/health")
 async def health_check():

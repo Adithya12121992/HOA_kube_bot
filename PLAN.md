@@ -559,66 +559,63 @@ Split queries by:
 
 ---
 
-# PHASE 5: REST API + HTML Chatbot with Config Toggles
+# PHASE 5: Unified HOA Bot Service (Chat + Upload)
 **Time:** 2 days | **Status:** Not started
 
 ## Goal
-Build a FastAPI service with REST endpoints and HTML/JS frontend chatbot that supports 2 config toggles (storage & retrieval mode). Deploy as Kubernetes pod.
+Build a single FastAPI service with unified HTML/JS interface (chat tab + upload tab) supporting 2 config toggles (storage & retrieval mode). Replace separate web-ui and chatbot services.
 
-### Step 5.1: Design Architecture (FastAPI + HTML)
+### Step 5.1: Design Unified Architecture (Chat + Upload)
 **Time:** 2 hours | **Checkpoint:** Architecture documented
 
-Create a file `chatbot_architecture.md`:
+Create a file `hoa_bot_architecture.md`:
 
 Document the overall architecture:
 ```
-Chatbot Service Architecture:
+Unified HOA Bot Service (Chat + Upload):
 
 ┌─────────────────────────────────────────────────────────────┐
-│                  K8s Pod: chatbot-service                   │
-│                  (new deployment)                           │
+│              K8s Pod: hoa-bot-service                       │
+│     (replaces separate web-ui + chatbot services)           │
 │                                                             │
 │  ┌─────────────────────────────────────────────────────┐   │
 │  │  FastAPI Service (Python)                           │   │
 │  │  - Port: 8000                                       │   │
-│  │  - Endpoints: GET /config, POST /config, POST /ask  │   │
-│  │  - Connects to: LangGraph RAG engine                │   │
-│  │  - State: In-memory config + session                │   │
+│  │  - Chat APIs: GET /config, POST /config, POST /ask  │   │
+│  │  - Upload API: POST /admin/upload                   │   │
+│  │  - Connects to: LangGraph RAG + RabbitMQ           │   │
+│  │  - Integrates with: Consumer (background processor)│   │
 │  └─────────────────────────────────────────────────────┘   │
 │                          ▲                                   │
 │                          │ (HTTP)                           │
 │  ┌─────────────────────────────────────────────────────┐   │
-│  │  HTML/JS Frontend (Static)                          │   │
-│  │  - Single HTML file with inline CSS + JS           │   │
-│  │  - Sidebar with 2 toggle groups (storage, retrieval)│   │
-│  │  - Chat area with messages + input box              │   │
-│  │  - Calls FastAPI endpoints via fetch()             │   │
-│  │  - Served from: /static/index.html                 │   │
+│  │  HTML/JS Frontend (Static, 2 Tabs)                  │   │
+│  │  Tab 1: Chat (main)                                 │   │
+│  │    ├─ Ask questions                                │   │
+│  │    ├─ See answers + sources                        │   │
+│  │    └─ Change config toggles                        │   │
+│  │  Tab 2: Upload (admin)                              │   │
+│  │    ├─ Upload PDF files                             │   │
+│  │    ├─ Messages sent to RabbitMQ queue              │   │
+│  │    └─ Consumer processes in background             │   │
 │  └─────────────────────────────────────────────────────┘   │
 │                                                             │
 │  Volumes:                                                   │
 │  ├─ .chroma_data/ (ChromaDB persistent)                   │
-│  └─ /data (shared PVC with consumer)                      │
+│  └─ /data (shared PVC for uploaded PDFs)                  │
 │                                                             │
 │  Environment:                                               │
-│  ├─ PINECONE_API_KEY (if hybrid mode)                     │
-│  └─ RAG_CONFIG (storage_mode, retrieval_mode)             │
+│  ├─ STORAGE_MODE: "local" or "hybrid"                     │
+│  ├─ RETRIEVAL_MODE: "fast" or "thinking"                 │
+│  └─ PINECONE_API_KEY (if hybrid mode)                     │
 └─────────────────────────────────────────────────────────────┘
 
-Message Flow:
-1. User opens http://localhost:8000/
-2. Browser loads HTML + CSS + JS
-3. Frontend calls GET /config to show current settings
-4. User changes toggle (storage or retrieval)
-5. Frontend calls POST /config with new values
-6. User asks question
-7. Frontend calls POST /ask with question
-8. FastAPI:
-   ├─ Loads current config
-   ├─ Instantiates LangGraph RAG with config
-   ├─ Runs query through pipeline
-   └─ Returns answer + sources + metadata
-9. Frontend displays answer + sources + latency
+User Flow:
+1. Open http://localhost:8000/
+2. Two tabs available: "Chat" and "Upload"
+3. Chat tab: Ask questions, see answers
+4. Upload tab: Upload PDFs, see upload history
+5. Toggle config (storage + retrieval mode) in either tab
 ```
 
 **Validation:**
@@ -721,88 +718,108 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 ✅ Ready for implementation
 ```
 
-### Step 5.3: Implement FastAPI Service
+### Step 5.3: Implement Unified HOA Bot Service
 **Time:** 4 hours | **Checkpoint:** Service runs locally
 
-- [ ] Create file: `chatbot_service.py` (based on skeleton from Step 5.2)
-- [ ] Implement:
+- [ ] Implement `src/services/chatbot/service.py` with:
   - [ ] FastAPI app initialization
-  - [ ] GET /config endpoint
-  - [ ] POST /config endpoint
-  - [ ] POST /ask endpoint (integrate with RAG engine)
+  - [ ] Chat endpoints:
+    - [ ] GET /config
+    - [ ] POST /config
+    - [ ] POST /ask (RAG integration)
+  - [ ] Upload endpoint:
+    - [ ] POST /admin/upload (saves file + sends to RabbitMQ)
   - [ ] GET /health endpoint
   - [ ] Static file serving for HTML
 - [ ] Add dependencies to requirements.txt:
   - [ ] `fastapi==0.100.0`
   - [ ] `uvicorn==0.23.2`
   - [ ] `pydantic==2.0.0`
-- [ ] Test locally: `uvicorn chatbot_service:app --reload --port 8000`
-- [ ] Verify endpoints work: `curl http://localhost:8000/config`
+  - [ ] `python-multipart==0.0.6` (for file uploads)
+- [ ] Test locally: `uvicorn src.services.chatbot.service:app --reload --port 8000`
+- [ ] Verify endpoints:
+  - [ ] `curl http://localhost:8000/` (should return HTML)
+  - [ ] `curl http://localhost:8000/config` (should return config)
 
 **Validation:**
 ```
 ✅ FastAPI service runs
-✅ All 4 endpoints respond
+✅ All endpoints respond (chat + upload)
 ✅ Config can be read/updated
-✅ RAG integration point clear
+✅ Upload saves files + queues messages
+✅ RabbitMQ integration working
 ```
 
-### Step 5.4: Implement HTML/JS Frontend
-**Time:** 3 hours | **Checkpoint:** HTML file complete
+### Step 5.4: Implement Unified HTML/JS Frontend
+**Time:** 4 hours | **Checkpoint:** HTML file complete (Chat disabled for Phase 1)
 
-- [ ] Create file: `static/index.html`
-- [ ] Implement:
-  - [ ] Single HTML file with inline CSS + JS (no external dependencies)
-  - [ ] Left sidebar:
+- [ ] Create file: `src/services/chatbot/static/index.html`
+- [ ] Implement with 2 tabs:
+  - [ ] Tab 1: Chat (PLACEHOLDER - UI shown but disabled)
+    - [ ] Message display area (shows "Coming soon..." message)
+    - [ ] Input box for questions (DISABLED - readonly)
+    - [ ] Send button (DISABLED - grayed out)
+    - [ ] Config toggles (ENABLED - can be changed)
+    - [ ] Note: Chat will be enabled after RAG engine is built (Phase 2+)
+  - [ ] Tab 2: Upload (admin interface - ENABLED)
+    - [ ] File input with drag-drop
+    - [ ] Upload button
+    - [ ] Upload status + progress
+    - [ ] Upload history
+  - [ ] Sidebar (on both tabs):
     - [ ] Storage mode toggle (local/hybrid)
     - [ ] Retrieval mode toggle (fast/thinking)
-    - [ ] Status badges showing current config
-  - [ ] Main chat area:
-    - [ ] Header showing "Local • Fast" (dynamic)
-    - [ ] Message display area (chat history)
-    - [ ] Input box for questions
-    - [ ] Send button
-  - [ ] JavaScript:
-    - [ ] `getConfig()` - fetch current config on load
-    - [ ] `updateConfig()` - POST to /config when toggles change
-    - [ ] `askQuestion()` - POST to /ask with question
-    - [ ] `displayMessage()` - show user questions + bot answers
-    - [ ] `displayMetadata()` - show latency, chunks, etc
+    - [ ] Status badges
+    - [ ] Config display ("Local • Fast")
+  - [ ] JavaScript functions:
+    - [ ] `getConfig()` - fetch config on load
+    - [ ] `updateConfig()` - POST /config when toggles change
+    - [ ] `askQuestion()` - POST /ask (disabled for Phase 1)
+    - [ ] `uploadFile()` - POST /admin/upload with file
+    - [ ] `displayMessage()` - show chat messages (disabled for Phase 1)
+    - [ ] `switchTab()` - toggle between Chat/Upload tabs
   - [ ] CSS:
     - [ ] Sidebar styling
-    - [ ] Chat message styling
-    - [ ] Radio button + badge styling
+    - [ ] Tab styling
+    - [ ] Message styling
+    - [ ] Upload area styling
+    - [ ] Disabled state styling (greyed out chat input)
     - [ ] Responsive layout (mobile-friendly)
 - [ ] Test in browser: `http://localhost:8000/`
 
 **Validation:**
 ```
-✅ HTML file loads
-✅ UI layout matches design
-✅ All buttons/toggles work
-✅ API calls succeed
-✅ Messages display correctly
+✅ HTML loads with both tabs
+✅ Chat tab: shows placeholder UI with disabled input
+✅ Upload tab: fully functional
+✅ Config toggles work
+✅ Responsive on mobile
 ```
+
+**Phase 1 State:** Upload works, Chat is placeholder (will be enabled in Phase 2+ when RAG engine is ready)
 
 ### Step 5.5: Create Docker & K8s Deployment
 **Time:** 2 hours | **Checkpoint:** Pod running in cluster
 
-- [ ] Create file: `chatbot_dockerfile`
+- [ ] File: `docker/hoa-bot.dockerfile` (already created)
   - [ ] Base: `python:3.11-slim`
   - [ ] Install: requirements.txt
-  - [ ] ENTRYPOINT: `uvicorn chatbot_service:app --host 0.0.0.0 --port 8000`
-  - [ ] Volume mount: `/data` (for ChromaDB + PVC)
-- [ ] Create file: `chatbot-deployment.yaml`
-  - [ ] Service: chatbot-service (port 8000)
-  - [ ] Deployment: chatbot (1 replica)
+  - [ ] CMD: `uvicorn src.services.chatbot.service:app --host 0.0.0.0 --port 8000`
+- [ ] File: `k8s/hoa-bot-deployment.yaml` (already created)
+  - [ ] Service: hoa-bot-service (port 8000)
+  - [ ] Deployment: hoa-bot (1 replica)
   - [ ] Mount PVC: producer-consumer-pvc at /data
-  - [ ] Environment: PINECONE_API_KEY, RAG_CONFIG
+  - [ ] Environment: STORAGE_MODE, RETRIEVAL_MODE, PINECONE_API_KEY
   - [ ] Resource limits: 256Mi memory, 200m CPU
-- [ ] Build Docker image: `docker build -f chatbot_dockerfile -t chatbot:latest .`
-- [ ] Import to k3d: `k3d image import chatbot:latest -c HOA-Bot`
-- [ ] Deploy: `kubectl apply -f chatbot-deployment.yaml`
-- [ ] Verify: `kubectl -n hoa-pipeline get pods | grep chatbot`
-- [ ] Port-forward: `kubectl -n hoa-pipeline port-forward svc/chatbot-service 8000:8000`
+- [ ] Remove old services (done):
+  - [ ] Delete `docker/web-ui.dockerfile`
+  - [ ] Delete `k8s/web-ui-deployment.yaml`
+  - [ ] Delete `src/services/web_ui/`
+- [ ] Build Docker image: `docker build -f docker/hoa-bot.dockerfile -t hoa-bot:latest .`
+- [ ] Import to k3d: `k3d image import hoa-bot:latest -c HOA-Bot`
+- [ ] Deploy: `kubectl apply -f k8s/hoa-bot-deployment.yaml`
+- [ ] Verify: `kubectl -n hoa-pipeline get pods | grep hoa-bot`
+- [ ] Port-forward: `kubectl -n hoa-pipeline port-forward svc/hoa-bot-service 8000:8000`
 - [ ] Test: `curl http://localhost:8000/` (should return HTML)
 
 **Validation:**
@@ -810,13 +827,15 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 ✅ Docker image builds
 ✅ K8s pod running
 ✅ Service accessible on :8000
-✅ HTML loads in browser
-✅ All endpoints work from browser
+✅ HTML loads with 2 tabs (Chat + Upload)
+✅ All endpoints work
+✅ Chat works
+✅ Upload works
 ```
 
-**End of Phase 5:** FastAPI chatbot service with toggles deployed  
-**Checkpoint:** Full chatbot service running in K8s, ready for benchmarking  
-**Commit to Git:** "Implement REST API + HTML chatbot with config toggles (Phase 5)"
+**End of Phase 5:** Unified HOA Bot service deployed (Chat + Upload in one app)  
+**Checkpoint:** Single service running in K8s, ready for benchmarking  
+**Commit to Git:** "Implement unified HOA Bot service with chat + upload (Phase 5)"
 
 ---
 
