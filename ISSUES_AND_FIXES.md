@@ -10,6 +10,8 @@ Documents the extract → clean → chunk pipeline has been run against, to trac
 
 | Date | Scope | Result |
 |---|---|---|
+| 2026-08-22 | Full consumer pipeline (`process_message`), real PDF, not mocked: extract → chunk → embed → store → summarize → status → delete → ack | Pass. Real doc (6 pages) → 3 chunks → embedded+stored (confirmed searchable in ChromaDB afterward, 0.66-0.73 similarity on a relevant query) → real 2-line summary generated via the user's actual local LM Studio instance, accurate to source content → status progressed uploaded→extracting→chunking→embedding→summarizing→ready with correct `chunks_done`/`chunks_total` at each step → file deleted → message acked. Error path also verified separately: missing file → nacks with `requeue=False`, writes `stage=error`, does not ack. |
+| 2026-08-22 | `summarize.py` local LLM path against the user's real running LM Studio instance (`qwen/qwen3-14b`) | Found and fixed a real bug — see Resolved #7 below. |
 | 2026-08-22 | Full round trip on pinned `requirements.txt` (Python 3.11, matches Docker target): extract → clean → chunk → embed → store → search | Pass. See Resolved #5 for what it took to get the pins actually installable, and Resolved #4 for a real metadata bug found in the process. |
 | 2026-08-22 | `store.py` embed/store/search round trip against real chunked data (CC&Rs, populated `sections` fields) | Found and fixed a real bug — see Resolved #4 below. |
 
@@ -42,6 +44,30 @@ _(none currently — see Won't Fix below for the one known remaining gap)_
 ---
 
 ## Resolved Issues
+
+### 8. Consumer had a hardcoded credential-shaped default value
+**Found:** 2026-08-22, wiring the real pipeline into `src/services/consumer/app.py` (Step 2.4)
+**Fixed:** 2026-08-22, same commit — switched to importing from `src/config/settings.py`
+
+**Problem:** `RABBITMQ_USER`/`RABBITMQ_PASSWORD` had hardcoded fallback defaults that looked like a real, previously-generated K8s secret value (`"default_user_jKPj7zmhwSN3JMMb5um"` / a 32-char random-looking password) rather than an obviously-fake placeholder like `"guest"`. In practice this default is unreachable in any real deployment (K8s always injects the real secret via env var), but a real-looking credential should never sit in source control as a fallback value regardless of whether it's currently reachable.
+
+**Fix:** Removed the local hardcoded defaults; now imports `RABBITMQ_USER`/`RABBITMQ_PASSWORD` from `src/config/settings.py`, which defaults to `"guest"` (RabbitMQ's actual generic default, not a real secret).
+
+### 7. Wrong empty-string handling for local reasoning models (Qwen3)
+**Found:** 2026-08-22, first real test of `src/rag/summarize.py` against the user's actual running LM Studio instance
+**Fixed:** 2026-08-22, `src/rag/summarize.py`
+
+**Problem:** First real call to the user's LM Studio server (model: `qwen/qwen3-14b`) returned an **empty string** as the summary instead of real content or a clean `None`. Inspected the raw API response directly: Qwen3 is a reasoning model — its response has a separate `reasoning_content` field (internal chain-of-thought) in addition to `content` (the real answer), and with `max_tokens=150`, the model spent 179 of 199 completion tokens on `reasoning_content` before generation hit the token limit (`finish_reason: "length"`), leaving `content` empty.
+
+Separately, port 1234 (LM Studio's default) turned out to be genuinely reachable — the user had it running already — but required a Bearer token the code didn't send, returning `401 Unauthorized` rather than a connection error.
+
+**Fix:**
+- Bumped local generation to `max_tokens=800` (vs 150 for cloud, which isn't a reasoning model by default) and the timeout to 240s (user-specified 3-minute floor) to give a reasoning model room to think *and* answer.
+- `content.strip() or None` instead of `content.strip()` — an empty string is now treated the same as "no summary," not returned as a falsy-but-truthy empty string.
+- Added `LM_STUDIO_API_KEY` support (Bearer auth header) to `src/config/settings.py` and `summarize.py`.
+- Wired up `.env` loading: `python-dotenv` was already a listed dependency but `load_dotenv()` was never actually called anywhere — a `.env` file would have silently done nothing. Added `load_dotenv()` to `src/config/settings.py`.
+
+**Verification:** Real end-to-end call against the user's LM Studio instance with a realistic CC&Rs-style prompt returned an accurate, on-topic 2-line summary (mentioned rental restrictions, board approval requirements, and architectural review — all present in the test prompt).
 
 ### 5. Pinned Phase 2 dependencies didn't actually install/import
 **Found:** 2026-08-22, installing the exact pinned `requirements.txt` versions in a clean venv before wiring `store.py` in
