@@ -1,0 +1,106 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatbot
+  namespace: hoa-pipeline
+  labels:
+    app: chatbot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chatbot
+  template:
+    metadata:
+      labels:
+        app: chatbot
+    spec:
+      containers:
+      - name: chatbot
+        image: chatbot:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        # Configuration toggles
+        - name: STORAGE_MODE
+          value: "local"  # "local" or "hybrid"
+        - name: RETRIEVAL_MODE
+          value: "fast"   # "fast" or "thinking"
+        # RabbitMQ (for consumer coordination)
+        - name: RABBITMQ_HOST
+          value: "hoa-rabbitmq"
+        - name: RABBITMQ_PORT
+          value: "5672"
+        - name: RABBITMQ_USER
+          valueFrom:
+            secretKeyRef:
+              name: hoa-rabbitmq-default-user
+              key: username
+        - name: RABBITMQ_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: hoa-rabbitmq-default-user
+              key: password
+        - name: RABBITMQ_QUEUE
+          value: "test_queue"
+        # Storage
+        - name: CHROMA_DB_PATH
+          value: "/data/.chroma_data"
+        - name: DATA_DIR
+          value: "/data"
+        # Pinecone (if hybrid mode enabled)
+        - name: PINECONE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: pinecone-secret
+              key: api-key
+              optional: true  # Optional if using local mode only
+        - name: LOG_LEVEL
+          value: "INFO"
+        volumeMounts:
+        - name: shared-storage
+          mountPath: /data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: shared-storage
+        persistentVolumeClaim:
+          claimName: producer-consumer-pvc
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chatbot-service
+  namespace: hoa-pipeline
+  labels:
+    app: chatbot
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+    name: http
+  selector:
+    app: chatbot

@@ -2,7 +2,7 @@
 ## From Docker Migration to Benchmarks & Evals
 
 **Status:** Ready to execute  
-**Total Time:** ~40-50 hours across 2-3 weeks  
+**Total Time:** ~35-40 hours across 2-3 weeks (simplified with 2 toggles)  
 **Approach:** Iterative (complete one phase before next)  
 **Last Updated:** 2026-08-22
 
@@ -19,8 +19,8 @@ Phase 3: Dual Storage (ChromaDB + Pinecone)
    ↓ (2 days)
 Phase 4: Sample Data Setup
    ↓ (1 day)
-Phase 5: UI Toggles & Settings
-   ↓ (2 days)
+Phase 5: UI Toggles (2 settings only: storage + retrieval)
+   ↓ (1 day)
 Phase 6: Test Suite
    ↓ (2 days)
 Phase 7: Benchmarking Framework
@@ -370,7 +370,7 @@ Configuration:
 ```
 
 ### Step 3.3: Document Config Structure
-**Time:** 2 hours | **Checkpoint:** Config file structure finalized
+**Time:** 1 hour | **Checkpoint:** Config file structure finalized
 
 Create a file `config_structure.md` (documentation):
 
@@ -378,46 +378,41 @@ Document the configuration:
 ```
 config.py should support:
 
-Vector Database Selection:
-├─ vector_db_backend: "local" | "pinecone" | "both"
-├─ if both:
-│  ├─ Write to ChromaDB
-│  ├─ Write to Pinecone
-│  └─ At query time, choose which to search
+User-Toggled Settings (2 only):
+├─ storage_mode: "local" | "hybrid"
+│  ├─ local: ChromaDB only
+│  └─ hybrid: ChromaDB + Pinecone (dual-write, then query local by default)
+│
+└─ retrieval_mode: "fast" | "thinking"
+   ├─ fast: Direct retrieval → generate (2-5s)
+   └─ thinking: Retrieve → grade → rewrite → generate (10-30s)
 
-Memory Backend Selection:
-├─ memory_backend: "simple" | "mem0"
-
-RAG Framework Selection:
-├─ rag_framework: "langgraph" | "llamaindex"
-
-Retrieval Mode Selection:
-├─ retrieval_mode: "fast" | "thinking"
-
-Pinecone Config (if needed):
-├─ pinecone_api_key: from environment
-├─ pinecone_index_name: "hoa-documents"
-
-Embedding Config:
-├─ embedding_model: "BAAI/bge-small-en-v1.5"
-├─ embedding_dimension: 384
-└─ embedding_batch_size: 32
-
-Chunking Config:
-├─ chunk_size: 3200
-├─ overlap: 1
-└─ min_chunk_size: 100
-
-Application Config:
-├─ app_name: "HOA Bot"
-├─ log_level: "INFO"
-└─ debug: false
+Fixed/Non-Toggled Config:
+├─ Pinecone:
+│  ├─ pinecone_api_key: from environment
+│  └─ pinecone_index_name: "hoa-documents"
+│
+├─ Embedding:
+│  ├─ embedding_model: "BAAI/bge-small-en-v1.5"
+│  ├─ embedding_dimension: 384
+│  └─ embedding_batch_size: 32
+│
+├─ Chunking:
+│  ├─ chunk_size: 3200
+│  ├─ overlap: 1
+│  └─ min_chunk_size: 100
+│
+└─ Application:
+   ├─ app_name: "HOA Bot"
+   ├─ log_level: "INFO"
+   └─ debug: false
 ```
 
 **Validation:**
 ```
 ✅ Config structure finalized
-✅ All options documented
+✅ Only 2 user toggles
+✅ Fixed config documented
 ✅ Defaults reasonable
 ```
 
@@ -564,181 +559,264 @@ Split queries by:
 
 ---
 
-# PHASE 5: UI Toggles & Settings
+# PHASE 5: REST API + HTML Chatbot with Config Toggles
 **Time:** 2 days | **Status:** Not started
 
 ## Goal
-Add UI controls for switching backends without code changes.
+Build a FastAPI service with REST endpoints and HTML/JS frontend chatbot that supports 2 config toggles (storage & retrieval mode). Deploy as Kubernetes pod.
 
-### Step 5.1: Design UI Layout (Document structure)
-**Time:** 1 day | **Checkpoint:** Layout documented
+### Step 5.1: Design Architecture (FastAPI + HTML)
+**Time:** 2 hours | **Checkpoint:** Architecture documented
 
-Create a file `ui_settings_design.md`:
+Create a file `chatbot_architecture.md`:
 
-Document the UI:
+Document the overall architecture:
 ```
-Current UI: Single input box + Send button
+Chatbot Service Architecture:
 
-New UI Structure:
-├─ Left Sidebar (Settings Panel)
-│  ├─ Section: 📦 Vector Database
-│  │  ├─ Radio: Local (ChromaDB) [selected]
-│  │  ├─ Radio: Cloud (Pinecone)
-│  │  └─ Status badge showing active DB
-│  │
-│  ├─ Section: 🧠 Memory System
-│  │  ├─ Radio: Simple Session Only [selected]
-│  │  ├─ Radio: Intelligent (Mem0)
-│  │  └─ Status badge showing memory type
-│  │
-│  ├─ Section: 🔄 RAG Framework
-│  │  ├─ Radio: LangGraph [selected]
-│  │  ├─ Radio: LlamaIndex
-│  │  └─ Status badge showing framework
-│  │
-│  └─ Section: ⚡ Retrieval Mode
-│     ├─ Radio: Fast (2-5s) [selected]
-│     ├─ Radio: Thinking (10-30s)
-│     └─ Status badge showing mode
-│
-├─ Main Chat Area
-│  ├─ Header showing current config:
-│  │  "Local • Simple • LangGraph • Fast"
-│  │
-│  ├─ Chat messages (existing)
-│  │
-│  ├─ Input box (existing)
-│  │
-│  └─ Send button (existing)
-│
-└─ Color scheme:
-   ├─ Sidebar: White background
-   ├─ Active setting: Blue highlight
-   ├─ Status badges: Green (active) / Gray (inactive)
-   └─ Main area: Light gradient background
-```
+┌─────────────────────────────────────────────────────────────┐
+│                  K8s Pod: chatbot-service                   │
+│                  (new deployment)                           │
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  FastAPI Service (Python)                           │   │
+│  │  - Port: 8000                                       │   │
+│  │  - Endpoints: GET /config, POST /config, POST /ask  │   │
+│  │  - Connects to: LangGraph RAG engine                │   │
+│  │  - State: In-memory config + session                │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                          ▲                                   │
+│                          │ (HTTP)                           │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  HTML/JS Frontend (Static)                          │   │
+│  │  - Single HTML file with inline CSS + JS           │   │
+│  │  - Sidebar with 2 toggle groups (storage, retrieval)│   │
+│  │  - Chat area with messages + input box              │   │
+│  │  - Calls FastAPI endpoints via fetch()             │   │
+│  │  - Served from: /static/index.html                 │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                                                             │
+│  Volumes:                                                   │
+│  ├─ .chroma_data/ (ChromaDB persistent)                   │
+│  └─ /data (shared PVC with consumer)                      │
+│                                                             │
+│  Environment:                                               │
+│  ├─ PINECONE_API_KEY (if hybrid mode)                     │
+│  └─ RAG_CONFIG (storage_mode, retrieval_mode)             │
+└─────────────────────────────────────────────────────────────┘
 
-**Validation:**
-```
-✅ Layout documented
-✅ All toggles defined
-✅ No conflicts between settings
-✅ Visual hierarchy clear
-```
-
-### Step 5.2: Design API Endpoints (Document)
-**Time:** 4 hours | **Checkpoint:** API spec documented
-
-Create a file `api_endpoints.md`:
-
-Document the API:
-```
-Current endpoints:
-├─ POST /ask
-│  ├─ Request: {"question": "..."}
-│  └─ Response: {"answer": "...", "sources": [...]}
-
-New endpoints needed:
-
-1. GET /config
-   Purpose: Get current configuration
-   Response: {
-     "vector_db": "local" | "pinecone",
-     "memory_backend": "simple" | "mem0",
-     "rag_framework": "langgraph" | "llamaindex",
-     "retrieval_mode": "fast" | "thinking",
-     "embedding_model": "BAAI/bge-small-en-v1.5"
-   }
-
-2. POST /config
-   Purpose: Update configuration
-   Request: {
-     "vector_db": "local",
-     "memory_backend": "simple",
-     "rag_framework": "langgraph",
-     "retrieval_mode": "fast"
-   }
-   Response: {
-     "status": "updated",
-     "config": {...}
-   }
-
-3. POST /ask (enhanced)
-   Request: {
-     "question": "...",
-     "user_id": "optional-user-id",
-     "retrieval_mode": "fast" (overrides config for this request)
-   }
-   Response: {
-     "answer": "...",
-     "sources": [...],
-     "config_used": {...},
-     "metadata": {
-       "latency_ms": 4200,
-       "chunks_searched": 8,
-       "chunks_relevant": 6
-     }
-   }
-
-4. GET /health
-   Purpose: Check service health
-   Response: {
-     "status": "healthy",
-     "vector_db_status": "connected",
-     "config": {...}
-   }
+Message Flow:
+1. User opens http://localhost:8000/
+2. Browser loads HTML + CSS + JS
+3. Frontend calls GET /config to show current settings
+4. User changes toggle (storage or retrieval)
+5. Frontend calls POST /config with new values
+6. User asks question
+7. Frontend calls POST /ask with question
+8. FastAPI:
+   ├─ Loads current config
+   ├─ Instantiates LangGraph RAG with config
+   ├─ Runs query through pipeline
+   └─ Returns answer + sources + metadata
+9. Frontend displays answer + sources + latency
 ```
 
 **Validation:**
 ```
-✅ All endpoints documented
-✅ Request/response formats clear
-✅ Error cases considered
-✅ No conflicts between endpoints
+✅ Architecture clear
+✅ FastAPI handles all logic
+✅ HTML is lightweight (no build step)
+✅ Single K8s pod deployment
+✅ Persistent data volumes mapped
 ```
 
-### Step 5.3: Document Frontend Changes Needed
-**Time:** 2 hours | **Checkpoint:** Changes listed
+### Step 5.2: Design FastAPI Service (Code skeleton)
+**Time:** 2 hours | **Checkpoint:** API code structure documented
 
-Create a file `ui_implementation_checklist.md`:
+Create a file `chatbot_service.py` (skeleton, not full implementation):
 
-List all changes needed (don't code yet):
-```
-HTML Changes:
-├─ Add sidebar div with settings
-├─ Add radio buttons for each toggle
-├─ Add status badges
-├─ Add config display in header
-└─ Reorganize layout with grid
+Document the structure:
+```python
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import json
 
-JavaScript Changes:
-├─ Add function: updateConfig() - calls POST /config
-├─ Add function: getConfig() - calls GET /config
-├─ Add function: loadConfigUI() - populates UI from config
-├─ Add event listeners for radio button changes
-├─ Update askQuestion() to accept retrieval_mode parameter
-├─ Update message display to show metadata (latency, etc)
-└─ Add error handling for config changes
+app = FastAPI()
 
-CSS Changes:
-├─ Add sidebar styling (width, background, padding)
-├─ Add radio button styling
-├─ Add status badge styling
-├─ Update main chat area to account for sidebar
-├─ Add transitions/animations for config changes
-└─ Ensure responsive (sidebar collapses on mobile)
+# In-memory config (persisted in environment at startup)
+config = {
+    "storage_mode": "local",      # "local" or "hybrid"
+    "retrieval_mode": "fast"      # "fast" or "thinking"
+}
+
+# Endpoints:
+
+@app.get("/")
+async def serve_ui():
+    """Serve index.html chatbot UI"""
+    return FileResponse("static/index.html")
+
+@app.get("/config")
+async def get_config():
+    """Return current config"""
+    return config
+
+@app.post("/config")
+async def update_config(new_config: dict):
+    """Update config toggles"""
+    global config
+    config.update(new_config)
+    return {"status": "updated", "config": config}
+
+@app.post("/ask")
+async def ask_question(request: dict):
+    """
+    Main endpoint: answer a question using RAG
+    
+    Input: {"question": "..."}
+    
+    Flow:
+    1. Get current config
+    2. Instantiate RAG engine with config
+    3. Run retrieve → [grade → rewrite if thinking] → generate
+    4. Return answer + sources + metadata
+    """
+    question = request["question"]
+    
+    # TODO: Import and instantiate RAG engine with config
+    # rag_engine = RAGEngine(
+    #     storage_mode=config["storage_mode"],
+    #     retrieval_mode=config["retrieval_mode"]
+    # )
+    # answer, sources, metadata = rag_engine.query(question)
+    
+    return {
+        "answer": "...",
+        "sources": [...],
+        "config_used": config,
+        "metadata": {
+            "latency_ms": 4200,
+            "chunks_searched": 8
+        }
+    }
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "config": config
+    }
+
+# Serve static files (CSS, JS embedded in HTML)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 ```
 
 **Validation:**
 ```
-✅ All changes catalogued
-✅ Frontend + backend aligned
-✅ No missing pieces
+✅ All endpoints defined
+✅ Config management clear
+✅ RAG integration point marked
+✅ Ready for implementation
 ```
 
-**End of Phase 5:** UI settings architecture designed  
-**Checkpoint:** Layouts, APIs, and implementation plan documented  
-**Commit to Git:** "Document UI settings design and API endpoints"
+### Step 5.3: Implement FastAPI Service
+**Time:** 4 hours | **Checkpoint:** Service runs locally
+
+- [ ] Create file: `chatbot_service.py` (based on skeleton from Step 5.2)
+- [ ] Implement:
+  - [ ] FastAPI app initialization
+  - [ ] GET /config endpoint
+  - [ ] POST /config endpoint
+  - [ ] POST /ask endpoint (integrate with RAG engine)
+  - [ ] GET /health endpoint
+  - [ ] Static file serving for HTML
+- [ ] Add dependencies to requirements.txt:
+  - [ ] `fastapi==0.100.0`
+  - [ ] `uvicorn==0.23.2`
+  - [ ] `pydantic==2.0.0`
+- [ ] Test locally: `uvicorn chatbot_service:app --reload --port 8000`
+- [ ] Verify endpoints work: `curl http://localhost:8000/config`
+
+**Validation:**
+```
+✅ FastAPI service runs
+✅ All 4 endpoints respond
+✅ Config can be read/updated
+✅ RAG integration point clear
+```
+
+### Step 5.4: Implement HTML/JS Frontend
+**Time:** 3 hours | **Checkpoint:** HTML file complete
+
+- [ ] Create file: `static/index.html`
+- [ ] Implement:
+  - [ ] Single HTML file with inline CSS + JS (no external dependencies)
+  - [ ] Left sidebar:
+    - [ ] Storage mode toggle (local/hybrid)
+    - [ ] Retrieval mode toggle (fast/thinking)
+    - [ ] Status badges showing current config
+  - [ ] Main chat area:
+    - [ ] Header showing "Local • Fast" (dynamic)
+    - [ ] Message display area (chat history)
+    - [ ] Input box for questions
+    - [ ] Send button
+  - [ ] JavaScript:
+    - [ ] `getConfig()` - fetch current config on load
+    - [ ] `updateConfig()` - POST to /config when toggles change
+    - [ ] `askQuestion()` - POST to /ask with question
+    - [ ] `displayMessage()` - show user questions + bot answers
+    - [ ] `displayMetadata()` - show latency, chunks, etc
+  - [ ] CSS:
+    - [ ] Sidebar styling
+    - [ ] Chat message styling
+    - [ ] Radio button + badge styling
+    - [ ] Responsive layout (mobile-friendly)
+- [ ] Test in browser: `http://localhost:8000/`
+
+**Validation:**
+```
+✅ HTML file loads
+✅ UI layout matches design
+✅ All buttons/toggles work
+✅ API calls succeed
+✅ Messages display correctly
+```
+
+### Step 5.5: Create Docker & K8s Deployment
+**Time:** 2 hours | **Checkpoint:** Pod running in cluster
+
+- [ ] Create file: `chatbot_dockerfile`
+  - [ ] Base: `python:3.11-slim`
+  - [ ] Install: requirements.txt
+  - [ ] ENTRYPOINT: `uvicorn chatbot_service:app --host 0.0.0.0 --port 8000`
+  - [ ] Volume mount: `/data` (for ChromaDB + PVC)
+- [ ] Create file: `chatbot-deployment.yaml`
+  - [ ] Service: chatbot-service (port 8000)
+  - [ ] Deployment: chatbot (1 replica)
+  - [ ] Mount PVC: producer-consumer-pvc at /data
+  - [ ] Environment: PINECONE_API_KEY, RAG_CONFIG
+  - [ ] Resource limits: 256Mi memory, 200m CPU
+- [ ] Build Docker image: `docker build -f chatbot_dockerfile -t chatbot:latest .`
+- [ ] Import to k3d: `k3d image import chatbot:latest -c HOA-Bot`
+- [ ] Deploy: `kubectl apply -f chatbot-deployment.yaml`
+- [ ] Verify: `kubectl -n hoa-pipeline get pods | grep chatbot`
+- [ ] Port-forward: `kubectl -n hoa-pipeline port-forward svc/chatbot-service 8000:8000`
+- [ ] Test: `curl http://localhost:8000/` (should return HTML)
+
+**Validation:**
+```
+✅ Docker image builds
+✅ K8s pod running
+✅ Service accessible on :8000
+✅ HTML loads in browser
+✅ All endpoints work from browser
+```
+
+**End of Phase 5:** FastAPI chatbot service with toggles deployed  
+**Checkpoint:** Full chatbot service running in K8s, ready for benchmarking  
+**Commit to Git:** "Implement REST API + HTML chatbot with config toggles (Phase 5)"
 
 ---
 
@@ -1459,14 +1537,14 @@ Phase 1: Infrastructure        2 days
 Phase 2: Incremental Chunking  3 days
 Phase 3: Dual Storage          2 days
 Phase 4: Sample Data           1 day
-Phase 5: UI Toggles            2 days
+Phase 5: UI Toggles            1 day (simplified: 2 toggles only)
 Phase 6: Test Suite            2 days
 Phase 7: Benchmarking Framework 2 days
 Phase 8: Run Benchmarks        2 days
 Phase 9: Analysis & Report     1 day
 Phase 10: Documentation        1 day
 ─────────────────────────────────────
-TOTAL: ~18 days of work
+TOTAL: ~17 days of work
 ```
 
 ## Critical Path (what blocks what)
