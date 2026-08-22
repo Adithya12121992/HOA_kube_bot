@@ -74,12 +74,16 @@ MEM0_API_KEY = os.getenv("MEM0_API_KEY", "")
 
 LLAMA_CLOUD_API_KEY = os.getenv("LLAMA_CLOUD_API_KEY", "")  # LlamaIndex (cloud rag_framework)
 
-# LLM fallback chain for cloud mode: try Claude first, fall back to OpenAI
+# Cloud LLM: Anthropic only (verified working end-to-end). OPENAI_API_KEY
+# is still read if set, but not in the active fallback chain — that
+# account hit insufficient_quota (no billing configured), and the user
+# opted to stick with Anthropic rather than fix that account. Add "openai"
+# back to CLOUD_LLM_FALLBACK_ORDER if that changes.
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
-CLOUD_LLM_FALLBACK_ORDER = ["anthropic", "openai"]  # try in this order
+CLOUD_LLM_FALLBACK_ORDER = ["anthropic"]
 
 # RabbitMQ
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
