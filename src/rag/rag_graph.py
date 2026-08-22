@@ -26,7 +26,15 @@ from typing import Any, TypedDict
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, StateGraph
 from openai import OpenAI
-from store import search
+from src.rag.store import search
+
+# TODO(Phase 5): hardcoded to OpenAI's SDK directly. Needs rework to route
+# through the environment bundle (local: LM Studio / cloud: Claude with
+# OpenAI fallback) per src/config/settings.py's ENVIRONMENT toggle, instead
+# of assuming OpenAI unconditionally. Not audited/verified against real data
+# yet - only moved to its correct location (src/rag/) and had its import
+# path fixed (was `from store import search`, a flat-script-layout import
+# that doesn't work as part of the src package) as part of Step 2.4 cleanup.
 
 
 class State(TypedDict):
