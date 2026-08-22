@@ -8,7 +8,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
-import time
 import os
 import json
 from datetime import datetime, timezone
@@ -16,10 +15,12 @@ import uuid
 import pika
 
 from src.config.settings import (
-    ENVIRONMENT, RETRIEVAL_MODE, get_config_dict, update_config,
+    get_config_dict, update_config,
     RABBITMQ_HOST, RABBITMQ_PORT, RABBITMQ_USER, RABBITMQ_PASSWORD,
     RABBITMQ_QUEUE, DATA_DIR
 )
+from src.rag.query import answer_question
+from src.rag.status import read_status
 
 app = FastAPI(title="HOA Bot", version="1.0.0")
 
@@ -82,40 +83,19 @@ async def update_config_endpoint(config: ConfigUpdate):
 @app.post("/ask")
 async def ask_question(request: AskRequest) -> AskResponse:
     """
-    Answer a question using RAG
+    Answer a question using RAG (fast mode — retrieve top-k, generate with citations).
 
-    Flow:
-    1. Load current config (environment bundle + retrieval mode)
-    2. Instantiate RAG engine for that bundle:
-       - local:  LangGraph + ChromaDB + LM Studio
-       - cloud:  LlamaIndex + Pinecone + Mem0 + Claude (fallback: OpenAI)
-    3. Run retrieve → [grade → rewrite if thinking] → generate
-    4. Return answer + sources + metadata
+    "Thinking" mode (retrieve -> grade -> rewrite -> generate) is not wired
+    up yet — see src/rag/rag_graph.py's module docstring. RETRIEVAL_MODE is
+    currently a no-op; both modes run fast-mode until that's built.
     """
-    start_time = time.time()
-
-    # TODO: Import RAG engine and run pipeline
-    # from src.rag.pipeline import RAGEngine
-    # rag = RAGEngine(
-    #     environment=ENVIRONMENT,
-    #     retrieval_mode=RETRIEVAL_MODE
-    # )
-    # answer, sources, metadata = rag.query(request.question)
-
-    # PLACEHOLDER response
-    answer = f"This is a placeholder answer to: '{request.question}'"
-    sources = []
-    latency_ms = (time.time() - start_time) * 1000
+    result = answer_question(request.question)
 
     return AskResponse(
-        answer=answer,
-        sources=sources,
+        answer=result["answer"],
+        sources=result["sources"],
         config_used=get_config_dict(),
-        metadata={
-            "latency_ms": round(latency_ms, 2),
-            "chunks_searched": 0,
-            "chunks_relevant": 0,
-        },
+        metadata=result["metadata"],
     )
 
 
@@ -189,6 +169,17 @@ async def upload_file(file: UploadFile = File(...)) -> UploadResponse:
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@app.get("/status/{doc_id}")
+async def get_status(doc_id: str):
+    """Poll processing status for an uploaded document (Step 2.5 design)."""
+    status = read_status(doc_id)
+    if status is None:
+        # Not an error — the upload was accepted but the consumer hasn't
+        # started processing it yet (race: message still in queue).
+        raise HTTPException(status_code=404, detail="Status not found yet — processing may not have started")
+    return status
 
 
 # ============================================================================
