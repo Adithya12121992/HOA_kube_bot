@@ -8,6 +8,11 @@ Running log of real bugs/gaps found during development (via local trials against
 
 Documents the extract → clean → chunk pipeline has been run against, to track test coverage (not every run finds a new bug — that's the point).
 
+| Date | Scope | Result |
+|---|---|---|
+| 2026-08-22 | Full round trip on pinned `requirements.txt` (Python 3.11, matches Docker target): extract → clean → chunk → embed → store → search | Pass. See Resolved #5 for what it took to get the pins actually installable, and Resolved #4 for a real metadata bug found in the process. |
+| 2026-08-22 | `store.py` embed/store/search round trip against real chunked data (CC&Rs, populated `sections` fields) | Found and fixed a real bug — see Resolved #4 below. |
+
 | Date | Document | Pages | Type | Result |
 |---|---|---|---|---|
 | 2026-08-22 | `25. Minutes of Regular Board Meetings...pdf` | 6 | report (minutes) | Clean. 3 chunks, no duplication, no bad progression. All boilerplate removed, including a new corruption pattern not seen before — two overlapping text elements interleaved character-by-character on 5/6 pages (`"MinuDteosc ument not for resale"`, apparently "Minutes" + "Document not for resale" rendered on top of each other) — still caught because the corrupted form itself repeated consistently across pages and matched via n-gram + substring stripping. Legitimate body-text mentions of "Board of Directors" (embedded in real sentences) correctly preserved; only the recurring standalone header instance was stripped. |
@@ -24,7 +29,7 @@ _(none currently — see Won't Fix below for the one known remaining gap)_
 
 ## Won't Fix (Deliberate)
 
-### 4. Letter-spaced text on embedded exhibit pages defeats word-level n-gram matching
+### 6. Letter-spaced text on embedded exhibit pages defeats word-level n-gram matching
 **Found:** 2026-08-22, re-verifying `src/rag/clean.py` after the n-gram fix (Resolved #3 below)
 **Decision:** 2026-08-22 — not worth fixing at the extraction/cleaning layer
 
@@ -37,6 +42,40 @@ _(none currently — see Won't Fix below for the one known remaining gap)_
 ---
 
 ## Resolved Issues
+
+### 5. Pinned Phase 2 dependencies didn't actually install/import
+**Found:** 2026-08-22, installing the exact pinned `requirements.txt` versions in a clean venv before wiring `store.py` in
+**Fixed:** 2026-08-22, `requirements.txt`
+
+**Problem:** Added `chromadb==0.4.22` and `sentence-transformers==2.2.2` to `requirements.txt` (numbers picked without installing them for real — same mistake as the earlier fastapi/pydantic incident). Testing the actual install turned up two failures:
+1. `numpy` was left unpinned, resolved to the latest (2.x). `chromadb==0.4.22` uses `np.float_`, removed in NumPy 2.0 — `AttributeError` on import.
+2. `sentence-transformers==2.2.2` imports `cached_download` from `huggingface_hub`, which no longer exists in current `huggingface_hub` — `ImportError` on import.
+
+Also tested on Python 3.14 first (this machine's default `python3`) and hit a separate, unrelated failure: `chromadb==0.4.22`'s pinned `pydantic-core` has no prebuilt wheel for 3.14 and fails building from source. Not fixed directly — re-tested on Python 3.11 instead, since that's the actual Docker deployment target (`python:3.11-slim`), and 3.11 was available locally too.
+
+**Fix:** Pinned `numpy==1.26.4` (last 1.x line, compatible with `chromadb==0.4.22`). Bumped `sentence-transformers` to `2.7.0` (drops the removed `huggingface_hub` API).
+
+**Verification:** Full clean-venv install on Python 3.11, followed by an actual functional round trip — not just "pip resolved a dependency graph" — extract → clean → chunk → embed → store → search against real chunked data, confirmed working end to end.
+
+### 4. store.py metadata bug — list fields silently emptied, numeric fields returned as strings
+**Found:** 2026-08-22, verifying `src/rag/store.py`'s embed/store/search round trip against real chunked data
+**Fixed:** 2026-08-22, `src/rag/store.py` (moved from `src/store.py`, rewritten during the fix)
+
+**Problem:** `add_chunks()` serialized list-typed metadata fields (`sections`) using Python's `str()` — `str(['3.1.2', '4.5'])` produces `"['3.1.2', '4.5']"`, single-quoted, which is **not valid JSON**. `search()` then called `json.loads()` on that string to restore it, wrapped in a `try/except (json.JSONDecodeError, ValueError)` that silently fell back to `[]` on failure. Confirmed directly: `json.loads("['3.1.2', '4.5']")` raises `json.JSONDecodeError`. Verified against real data — 63 of 69 chunks from the CC&Rs document have a non-empty `sections` list, meaning **the large majority of real chunks would silently lose their section citations on retrieval**, with no error or warning surfaced anywhere. An empty-list test alone (`str([])` = `"[]"`, which happens to also be valid JSON) would never have caught this — only testing against real populated data did.
+
+Separately, `page_start`, `page_end`, `char_start`, `char_end` were blanket-converted from int to string at write time (`if isinstance(v, int): meta_str[k] = str(v)`) and never converted back on read — `sections` was explicitly restored via `json.loads()` but these numeric fields were not, so they came back as `'1'` instead of `1`. ChromaDB actually supports int metadata natively, so this stringify step wasn't even necessary.
+
+**Fix:** Rewrote `_prepare_metadata()` / `_restore_metadata()` (new helper functions) in the relocated `src/rag/store.py`: lists are `json.dumps()`'d (valid JSON, round-trips correctly), ints pass through natively (no stringify needed), and `Optional[str]` fields (`article`, `section_inherited`) that get stored as `""` in place of `None` (ChromaDB metadata can't hold `None`) are explicitly restored back to `None` on read.
+
+**Verification (real CC&Rs chunks, populated `sections`):**
+
+| Field | Before | After |
+|---|---|---|
+| `sections` (69 chunks, 63 populated) | `[]` on every populated chunk (silently wrong) | Exact match to original, e.g. `['1.4.4', '1.4.5']` |
+| `page_start` / `page_end` | `'15'` (str) | `15` (int) |
+| `article` | `''` when originally `None` | `None` |
+
+Direct before/after comparison on a specific chunk (`chunk_11`) confirmed byte-exact round trip after the fix.
 
 ### 3. Watermark noise defeated exact-match boilerplate detection
 **Found:** 2026-08-22, verifying `src/rag/clean.py` against `docs/30. CC&Rs (Required Civil Code Sec. 4525).pdf`
@@ -63,7 +102,7 @@ Each garbled variant is its own distinct normalized string, so the vote for the 
 | `Address: 825 S 22nd St` occurrences remaining | 72 | 0 |
 | All 4 originally-targeted boilerplate elements | 3/4 clean | 4/4 clean |
 
-Re-running the full pipeline (extract → clean → chunk) surfaced a **new**, narrower issue — letter-spaced text on an embedded exhibit section — documented separately as Open Issue #4 above, rather than folded into this fix.
+Re-running the full pipeline (extract → clean → chunk) surfaced a **new**, narrower issue — letter-spaced text on an embedded exhibit section — documented separately as Won't Fix #6 above (deliberately not addressed — see that entry for reasoning), rather than folded into this fix.
 
 ### 2. Extraction produced one text blob per page — no real paragraph structure, boilerplate leaked into every chunk
 **Found:** 2026-08-22, during local chunking trial (naive `page.extract_text()` join)
@@ -95,7 +134,7 @@ The watermark-contaminated `Address:` line mentioned as an open gap at the time 
 ### 1. Chunk overlap bug — 18x too many chunks, near-duplicate content
 **Found:** 2026-08-22, during local chunking trial on `docs/30. CC&Rs (Required Civil Code Sec. 4525).pdf`
 **Fixed:** 2026-08-22, commit `2f21dcf`
-**File:** `src/chunk.py` — `chunks_from_paragraphs()`
+**File:** `src/rag/chunk.py` (was `src/chunk.py` at the time of this fix, relocated later) — `chunks_from_paragraphs()`
 
 **Problem:** Ran the existing `chunk_document()` against a real 88-page, 203,573-character document. Expected roughly 63 chunks (at 3,200 chars/chunk target); got **1,160 chunks**, with consecutive chunks nearly identical in content.
 
