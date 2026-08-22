@@ -65,7 +65,10 @@ LM_STUDIO_API_KEY = os.getenv("LM_STUDIO_API_KEY", "")  # LM Studio can require 
 # --- Cloud environment ---
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
 PINECONE_INDEX_NAME = "hoa-documents"
-PINECONE_ENVIRONMENT = "gcp-starter"
+# Note: no PINECONE_ENVIRONMENT setting — that was the old Pinecone v2 API
+# concept (e.g. "gcp-starter"). The modern client (matching "pcsk_..." key
+# format) resolves the index host from name + API key directly; serverless
+# cloud/region is set once at index-creation time, not per-request.
 
 MEM0_API_KEY = os.getenv("MEM0_API_KEY", "")
 

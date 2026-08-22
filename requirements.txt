@@ -22,3 +22,6 @@ pdfplumber==0.10.3
 sentence-transformers==2.7.0
 chromadb==0.4.22
 numpy==1.26.4
+
+# Phase 3: Cloud environment bundle (Pinecone storage)
+pinecone==9.1.0
