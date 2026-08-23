@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
+import asyncio
 import os
 import json
 from datetime import datetime, timezone
@@ -88,8 +89,19 @@ async def ask_question(request: AskRequest) -> AskResponse:
     "Thinking" mode (retrieve -> grade -> rewrite -> generate) is not wired
     up yet — see src/rag/rag_graph.py's module docstring. RETRIEVAL_MODE is
     currently a no-op; both modes run fast-mode until that's built.
+
+    answer_question() is a fully synchronous, blocking call (it makes a
+    blocking requests.post() to the LLM that can legitimately take minutes
+    for local reasoning models) - run it in a thread, not directly on this
+    async endpoint. Calling it directly would block uvicorn's event loop
+    for the whole duration, starving every other request on this server
+    including GET /health, which is exactly what caused Kubernetes'
+    liveness probe to fail and kill this pod mid-request (confirmed via
+    kubectl describe pod: "Liveness probe failed: context deadline
+    exceeded" during an in-flight /ask call, "Client disconnected" in the
+    LLM's own logs at the same moment - see ISSUES_AND_FIXES.md).
     """
-    result = answer_question(request.question)
+    result = await asyncio.to_thread(answer_question, request.question)
 
     return AskResponse(
         answer=result["answer"],
