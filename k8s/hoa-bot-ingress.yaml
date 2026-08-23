@@ -1,0 +1,35 @@
+# Routes host port 8000 -> hoa-bot-service, via k3d's built-in Traefik
+# ingress controller and load balancer. Requires the cluster's load
+# balancer to actually publish that port to the host first (one-time,
+# already applied to this cluster - not re-run automatically by
+# `kubectl apply`):
+#
+#   k3d cluster edit HOA-Bot --port-add 8000:80@loadbalancer
+#
+# Why this exists instead of `kubectl port-forward`: port-forward's tunnel
+# has its own idle/stream timeout shorter than a local reasoning model's
+# response time (confirmed: a real request was cut off at exactly 60s,
+# "connection reset by peer"). This Ingress path goes through k3d's real
+# Docker port-publish instead of a client-side kubectl process, so it
+# survives pod restarts/redeploys without needing to be manually restarted
+# (verified: triggered a rollout restart, http://localhost:8000/health
+# kept working immediately after with zero manual steps).
+#
+# Access: http://localhost:8000/ (once the cluster's port-add is applied)
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hoa-bot-ingress
+  namespace: hoa-pipeline
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: hoa-bot-service
+            port:
+              number: 8000

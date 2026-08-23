@@ -10,6 +10,7 @@ Documents the extract → clean → chunk pipeline has been run against, to trac
 
 | Date | Scope | Result |
 |---|---|---|
+| 2026-08-22 | `/ask` event-loop-blocking fix: real concurrent test, real LM Studio call | Pass. See Resolved #12 below - a real, user-reported, in-production bug. |
 | 2026-08-22 | Dual-write `add_chunks()` against real ChromaDB + real Pinecone, redeployed to K8s | Pass. One real chunk written once, confirmed independently searchable from both backends with matching similarity scores (0.715 / 0.714) after flipping the environment toggle between calls. `reset()` confirmed clearing both. Both pods redeployed and stable after the change. |
 | 2026-08-22 | Config toggle cross-process propagation, real test | Found and fixed a real bug — see Resolved #11 below. Verified both the single-process and cross-process/pod cases separately. |
 | 2026-08-22 | Full K8s deployment (real `docker build` → `k3d image import` → `kubectl rollout`), consumer + hoa-bot pods | Found and fixed a real bug — see Resolved #10 below. Both pods stable at `1/1 Running`, 0 restarts, after the fix. |
@@ -50,6 +51,23 @@ _(none currently — see Won't Fix below for the one known remaining gap)_
 ---
 
 ## Resolved Issues
+
+### 12. `/ask` blocked the event loop, causing K8s to kill the pod mid-generation
+**Found:** 2026-08-22, real user report: asked a question, got "Failed to fetch" in the browser; LM Studio's own logs showed "Client disconnected. Stopping generation..." partway through, with no code change or redeploy happening at the time
+**Fixed:** 2026-08-22, `src/services/chatbot/service.py` — wrapped the blocking call in `asyncio.to_thread()`
+
+**Problem:** First suspected `kubectl port-forward` flakiness (a real, separate issue — see below), but a repeat report with the exact same symptom, at a point where no redeploy was happening, pointed to something more fundamental. `kubectl describe pod` on the exact failure window showed the real cause:
+```
+Warning  Unhealthy  Liveness probe failed: Get "http://.../health": context deadline exceeded
+Normal   Killing    Container hoa-bot failed liveness probe, will be restarted
+```
+`/ask` was declared `async def` but called `answer_question()` — a fully synchronous, blocking function (`requests.post()` to the LLM, which can legitimately take minutes for local reasoning models) — directly, with no `await`. uvicorn runs a single-threaded event loop by default, so this blocked the **entire server** for the whole duration of the LLM call, including `GET /health`, which the K8s liveness probe depends on. After 3 consecutive failed health checks (~30s), Kubernetes concluded the pod was unhealthy and **killed it mid-request** — exactly what "Client disconnected" was reporting from LM Studio's side, and what "Failed to fetch" was reporting from the browser's side.
+
+**Fix:** `result = await asyncio.to_thread(answer_question, request.question)` instead of calling it directly — moves the blocking work off the event loop so `/health` (and everything else) stays responsive while `/ask` is in flight.
+
+**Verification (real concurrency test, not a code read):** seeded one real chunk, fired a real `/ask` request (real LM Studio call) in the background, then hit `/health` 8 times over 15 seconds while it was in flight — **every single check returned in under 1.4ms**. The `/ask` call itself completed successfully in 13.4s with an accurate, correctly-cited answer ("Yes, you can have wind chimes if they are under 12 inches... [1]").
+
+**Related, separate issue found in the same investigation — `kubectl port-forward` timeout:** even after the above fix, `kubectl port-forward`'s own tunnel (SPDY/WebSocket-based) has an idle/stream timeout shorter than a local reasoning model's response time — confirmed directly: a real request was cut off at **exactly 60 seconds** ("connection reset by peer"), and the port-forward process itself was found completely dead (`Connection refused`, not in `ps aux`) after normal use. This isn't fixed by the async change above — the process-level tunnel is just not built for multi-minute requests. Replaced it with a stable path that doesn't depend on a kept-alive local process: added `k3d cluster edit HOA-Bot --port-add 8000:80@loadbalancer` (real Docker port-publish on the cluster's load balancer, one-time, non-destructive — only recreates the load balancer container, not the server/agent nodes where the PVC data lives) plus a K8s `Ingress` (`k8s/hoa-bot-ingress.yaml`) routing to `hoa-bot-service`. Verified: `http://localhost:8000/` survives a full `kubectl rollout restart` with zero manual steps, unlike port-forward which needed restarting after every redeploy in this session.
 
 ### 11. Config toggle frozen at import time, and not shared across pods
 **Found:** 2026-08-22, investigating why an uploaded doc only appeared in ChromaDB, not Pinecone
