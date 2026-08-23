@@ -99,3 +99,25 @@ def read_status(doc_id: str) -> Optional[Status]:
         return json.loads(path.read_text())
     except (json.JSONDecodeError, OSError):
         return None
+
+
+def list_statuses() -> list[Status]:
+    """All known document statuses, newest first.
+
+    Lets the frontend rebuild its upload history and resume polling
+    in-progress documents after a page refresh, instead of relying on
+    JS-only in-memory state that's lost the moment the tab reloads.
+    """
+    status_dir = _status_dir()
+    if not status_dir.exists():
+        return []
+
+    statuses = []
+    for path in status_dir.glob("*.json"):
+        try:
+            statuses.append(json.loads(path.read_text()))
+        except (json.JSONDecodeError, OSError):
+            continue  # skip a corrupt/half-written file rather than fail the whole list
+
+    statuses.sort(key=lambda s: s.get("updated_at", ""), reverse=True)
+    return statuses

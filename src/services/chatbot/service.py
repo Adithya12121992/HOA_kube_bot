@@ -20,7 +20,7 @@ from src.config.settings import (
     RABBITMQ_QUEUE, DATA_DIR
 )
 from src.rag.query import answer_question
-from src.rag.status import read_status
+from src.rag.status import read_status, list_statuses
 
 app = FastAPI(title="HOA Bot", version="1.0.0")
 
@@ -171,9 +171,21 @@ async def upload_file(file: UploadFile = File(...)) -> UploadResponse:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
+@app.get("/status")
+async def get_all_statuses():
+    """All known document statuses, newest first.
+
+    Lets the frontend rebuild upload history and resume polling in-progress
+    documents after a page refresh — the JS-only in-memory tracking has no
+    way to know what was mid-upload once the tab reloads, but every
+    document's status already persists as a file on the shared PVC anyway.
+    """
+    return list_statuses()
+
+
 @app.get("/status/{doc_id}")
 async def get_status(doc_id: str):
-    """Poll processing status for an uploaded document (Step 2.5 design)."""
+    """Poll processing status for a single uploaded document (Step 2.5 design)."""
     status = read_status(doc_id)
     if status is None:
         # Not an error — the upload was accepted but the consumer hasn't

@@ -329,6 +329,7 @@
       uploadStatus.textContent = "";
       if (res.ok) {
         const item = addHistoryItem(data.filename, "uploaded, queued for processing", true);
+        item.dataset.docId = data.doc_id;
         pollStatus(data.doc_id, item);
       } else {
         addHistoryItem(file.name, data.detail || "Upload failed", false);
@@ -347,6 +348,33 @@
     return item;
   }
 
+  // Rebuilds upload history from the server on page load - every document's
+  // status already persists as a file on the shared PVC (see
+  // src/rag/status.py), so a page refresh doesn't have to lose track of
+  // what's mid-upload; only the JS-side polling loop was ever in-memory-only.
+  async function loadUploadHistory() {
+    try {
+      const res = await fetch("/status");
+      if (!res.ok) return;
+      const statuses = await res.json();
+
+      // list_statuses() returns newest-first; addHistoryItem prepends, so
+      // iterate oldest-first here to end up with newest-on-top, matching
+      // how live uploads are added.
+      for (const status of [...statuses].reverse()) {
+        const item = addHistoryItem(status.filename, "", true);
+        item.dataset.docId = status.doc_id;
+        applyStatusToItem(item, status);
+        if (!isTerminalStage(status.stage)) {
+          pollStatus(status.doc_id, item);
+        }
+      }
+    } catch (err) {
+      // Upload tab just starts empty if this fails - not fatal, the user
+      // can still upload new documents.
+    }
+  }
+
   const STAGE_LABELS = {
     uploaded: "Queued",
     extracting: "Extracting text",
@@ -357,41 +385,61 @@
     error: "✗ Failed",
   };
 
-  function pollStatus(docId, item) {
+  function isTerminalStage(stage) {
+    return stage === "ready" || stage === "error";
+  }
+
+  // Applies a status object to an already-rendered history item's DOM -
+  // shared by the live poll loop and by rebuilding history from GET /status
+  // on page load, so both paths render identically.
+  function applyStatusToItem(item, status) {
     const detailEl = item.querySelector(".detail");
+    let label = STAGE_LABELS[status.stage] || status.stage;
+    if (status.stage === "embedding" && status.chunks_total) {
+      label += ` (${status.chunks_done || 0}/${status.chunks_total})`;
+    }
+    if (status.stage === "error") {
+      label = `✗ ${status.error_message || "Processing failed"}`;
+    }
+    detailEl.textContent = label;
+
+    item.classList.remove("success", "error");
+    if (status.stage === "ready") {
+      item.classList.add("success");
+      const existingSummary = item.querySelector(".item-summary");
+      if (status.summary && !existingSummary) {
+        const summaryEl = document.createElement("div");
+        summaryEl.className = "item-summary";
+        summaryEl.style.marginTop = "6px";
+        summaryEl.style.color = "var(--muted)";
+        summaryEl.style.fontSize = "12px";
+        summaryEl.textContent = status.summary;
+        item.appendChild(summaryEl);
+      }
+    } else if (status.stage === "error") {
+      item.classList.add("error");
+    }
+  }
+
+  function pollStatus(docId, item) {
     const interval = setInterval(async () => {
       try {
         const res = await fetch(`/status/${docId}`);
         if (res.status === 404) return; // consumer hasn't started yet, keep polling
         const status = await res.json();
 
-        let label = STAGE_LABELS[status.stage] || status.stage;
-        if (status.stage === "embedding" && status.chunks_total) {
-          label += ` (${status.chunks_done || 0}/${status.chunks_total})`;
-        }
-        detailEl.textContent = label;
+        applyStatusToItem(item, status);
 
-        if (status.stage === "ready") {
+        if (isTerminalStage(status.stage)) {
           clearInterval(interval);
-          item.classList.add("success");
-          if (status.summary) {
-            const summaryEl = document.createElement("div");
-            summaryEl.style.marginTop = "6px";
-            summaryEl.style.color = "var(--muted)";
-            summaryEl.style.fontSize = "12px";
-            summaryEl.textContent = status.summary;
-            item.appendChild(summaryEl);
-          }
-        } else if (status.stage === "error") {
-          clearInterval(interval);
-          item.classList.add("error");
-          detailEl.textContent = `✗ ${status.error_message || "Processing failed"}`;
         }
       } catch (err) {
         // transient fetch error - keep polling, don't give up on one failed request
       }
     }, 1500);
   }
+
+  loadUploadHistory();
 
   // Chat
   const chatMessages = document.getElementById("chat-messages");
