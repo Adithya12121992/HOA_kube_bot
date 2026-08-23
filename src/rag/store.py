@@ -84,9 +84,9 @@ _INT_FIELDS = {"page_start", "page_end", "char_start", "char_end"}
 # None), restored back to None on read.
 _NULLABLE_STR_FIELDS = {"article", "section_inherited"}
 
-# Global embedding model + backend clients (loaded/connected once)
+# Global embedding model + backend clients (loaded/connected once).
+# ChromaDB is deliberately NOT cached here - see _get_chroma_client().
 _embedding_model: Optional[SentenceTransformer] = None
-_chroma_client: Optional[chromadb.PersistentClient] = None
 _pinecone_index = None
 _llama_vector_store: Optional[PineconeVectorStore] = None
 
@@ -188,15 +188,35 @@ def _restore_metadata(meta: dict) -> dict:
 
 
 def _get_chroma_client() -> chromadb.PersistentClient:
-    """Lazy-load ChromaDB client."""
-    global _chroma_client
-    if _chroma_client is None:
-        os.makedirs(CHROMA_DATA, exist_ok=True)
-        _chroma_client = chromadb.PersistentClient(
-            str(CHROMA_DATA),
-            settings=chromadb.Settings(anonymized_telemetry=False),
-        )
-    return _chroma_client
+    """Open a fresh ChromaDB client on every call.
+
+    consumer and hoa-bot are separate long-running processes/pods both
+    pointed at the same on-disk ChromaDB path on the shared PVC. Confirmed
+    as a real bug: hoa-bot kept returning 0 search results for a document
+    consumer had already written (independently confirmed present via a
+    fresh one-off process), until hoa-bot's pod restarted.
+
+    Root cause is NOT this project's own client caching (removing that
+    alone did not fix it - verified) but chromadb's own internal
+    chromadb.api.client.SharedSystemClient._identifer_to_system: a
+    class-level (i.e. process-global) dict caching the underlying System
+    object per persist_directory, reused by every `PersistentClient(path)`
+    call within the same process regardless of on-disk changes made by a
+    different process in the meantime. Evicting that cache entry before
+    each open forces a true reread from disk - confirmed with a real
+    synchronized cross-process test (writer process writes and exits or
+    stays alive; a separate long-lived "reader" process, without evicting,
+    still saw 0 results after the write; with eviction, saw the write
+    immediately, no restart needed).
+    """
+    from chromadb.api.client import SharedSystemClient
+
+    os.makedirs(CHROMA_DATA, exist_ok=True)
+    SharedSystemClient._identifer_to_system.pop(str(CHROMA_DATA), None)
+    return chromadb.PersistentClient(
+        str(CHROMA_DATA),
+        settings=chromadb.Settings(anonymized_telemetry=False),
+    )
 
 
 def _chroma_add_chunks(chunks: list[dict], embeddings: list[list[float]]) -> int:

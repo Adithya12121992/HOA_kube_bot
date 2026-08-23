@@ -10,6 +10,7 @@ Documents the extract → clean → chunk pipeline has been run against, to trac
 
 | Date | Scope | Result |
 |---|---|---|
+| 2026-08-23 | ChromaDB cross-process staleness fix: real synchronized writer/reader process test, plus a real upload through the live deployed service with no pod restart | Pass. See Resolved #17 below - a real, user-reported bug (uploaded doc's content wasn't answerable). |
 | 2026-08-22 | Automated test suite (69 tests: unit + integration, `pytest tests/`) built and run against real ChromaDB/real embedding model/real FastAPI routing | Pass, after finding and fixing a real bug in the test harness itself - see Resolved #16 below. |
 | 2026-08-22 | Full deploy verification: rebuilt both Docker images (thinking mode + Mem0 + LlamaIndex), `k3d image import`, rolling restart, real `/ask` calls through the live Ingress (`http://localhost:8000`) | Pass. Both pods `1/1 Running`, 0 restarts. CPU-only torch (`2.13.0+cpu`) confirmed still present in both rebuilt images. Two real cloud+thinking-mode questions through the actual deployed pod, second correctly recalling the first via Mem0 (`memories_used: 5`), citing real CC&Rs content with correct page numbers both times. |
 | 2026-08-22 | LlamaIndex cloud retrieval (PineconeVectorStore), real Pinecone index, full `add_chunks`/`search`/fast/thinking pipeline | Pass. See Resolved #15 below. |
@@ -56,6 +57,18 @@ _(none currently — see Won't Fix below for the one known remaining gap)_
 ---
 
 ## Resolved Issues
+
+### 17. ChromaDB writes from `consumer` invisible to `hoa-bot` until pod restart
+**Found:** 2026-08-23, real user report: uploaded a real document (an escrow coversheet, containing an escrow officer's name), asked about it, got "I couldn't find any relevant documents" even though the upload had completed successfully and the chunk was independently confirmed present via a one-off script.
+**Fixed:** 2026-08-23, `src/rag/store.py`
+
+**Problem:** `consumer` and `hoa-bot` are separate long-running K8s pods/processes, both pointed at the same on-disk ChromaDB path on the shared PVC. First hypothesis - that this project's own `_chroma_client` module-level cache in `hoa-bot`'s process was stale - was **wrong** and disproven by a real synchronized cross-process test: removing that caching (opening a fresh `chromadb.PersistentClient(path)` per call) still returned 0 results for data a separate process had just written and confirmed durably on disk (verified directly against the raw `chroma.sqlite3` file with `sqlite3 ... SELECT COUNT(*)`, showing the row present while the writer process was still alive).
+
+**Real root cause:** chromadb 0.4.22's own internal `chromadb.api.client.SharedSystemClient._identifer_to_system` — a **class-level (process-global) dict** caching the underlying `System` object (segment manager, in-memory HNSW index, etc.) per `persist_directory` string. Every `PersistentClient(path)` call *within the same process* reuses that cached `System`, regardless of how many "fresh" client wrapper objects are constructed - it never rereads from disk unless that process's cached entry is evicted or the process restarts. Confirmed with three separate real tests: (1) a synchronized two-process test using file-based signaling (writer writes, signals, long-lived "reader" process queries — 0 results without a fix); (2) the same test with `SharedSystemClient._identifer_to_system.pop(path, None)` added before each read — found the write immediately, no restart; (3) a real upload through the live deployed service (`POST /admin/upload`), queried via `/ask` seconds later with the `hoa-bot` pod never restarted — got the correct answer with the correct citation.
+
+**Fix:** `_get_chroma_client()` now evicts the identifier from `SharedSystemClient._identifer_to_system` before constructing each `PersistentClient`, forcing a genuine reread of on-disk state on every call. Costs a full System/segment reload per request rather than reusing an in-memory handle - acceptable at this project's data scale (tens to low hundreds of chunks); would need revisiting (most correctly, running ChromaDB as a proper server via `HttpClient` instead of embedded `PersistentClient`, so there's one authoritative process instead of two independent embedded ones) if the corpus grows large enough for reload cost to matter.
+
+**Verification:** all 69 automated tests still pass (single-process test runs, where this bug doesn't manifest, confirming no regression). Real fix confirmed via the three tests described above - most importantly, a real document uploaded through the live service and immediately queryable with zero pod restarts, matching exactly the failure the user hit.
 
 ### 16. Automated test suite (Phase 6): frozen-import bug in the test harness itself, plus a FastAPI TestClient/httpx version conflict
 **Found:** 2026-08-22, while building `tests/` (69 tests: unit + integration)
