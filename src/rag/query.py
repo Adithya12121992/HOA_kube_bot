@@ -1,9 +1,9 @@
 """Fast-mode RAG query: retrieve top-k chunks, generate a grounded answer with citations.
 
 "Thinking" mode (retrieve -> grade -> rewrite -> generate) is a separate,
-more involved corrective-RAG flow — see src/rag/rag_graph.py (moved but not
-yet audited/rewired to the environment bundle design, see its module
-docstring). This module covers "fast" mode only.
+more involved corrective-RAG flow — see src/rag/thinking.py, which reuses
+Source/AnswerResult/_build_context from this module. This module covers
+"fast" mode only.
 """
 
 from __future__ import annotations

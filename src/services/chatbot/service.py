@@ -21,6 +21,8 @@ from src.config.settings import (
     RABBITMQ_QUEUE, DATA_DIR
 )
 from src.rag.query import answer_question
+from src.rag.thinking import answer_question_thinking
+from src.config.settings import get_retrieval_mode
 from src.rag.status import read_status, list_statuses
 
 app = FastAPI(title="HOA Bot", version="1.0.0")
@@ -84,24 +86,28 @@ async def update_config_endpoint(config: ConfigUpdate):
 @app.post("/ask")
 async def ask_question(request: AskRequest) -> AskResponse:
     """
-    Answer a question using RAG (fast mode — retrieve top-k, generate with citations).
+    Answer a question using RAG. Dispatches on the retrieval_mode toggle:
+      - "fast": retrieve top-k, generate directly (src/rag/query.py)
+      - "thinking": corrective RAG - retrieve, grade, rewrite if needed,
+        generate (src/rag/thinking.py) - higher latency, higher precision
+        on ambiguous/colloquial questions
 
-    "Thinking" mode (retrieve -> grade -> rewrite -> generate) is not wired
-    up yet — see src/rag/rag_graph.py's module docstring. RETRIEVAL_MODE is
-    currently a no-op; both modes run fast-mode until that's built.
-
-    answer_question() is a fully synchronous, blocking call (it makes a
-    blocking requests.post() to the LLM that can legitimately take minutes
-    for local reasoning models) - run it in a thread, not directly on this
-    async endpoint. Calling it directly would block uvicorn's event loop
-    for the whole duration, starving every other request on this server
-    including GET /health, which is exactly what caused Kubernetes'
-    liveness probe to fail and kill this pod mid-request (confirmed via
-    kubectl describe pod: "Liveness probe failed: context deadline
-    exceeded" during an in-flight /ask call, "Client disconnected" in the
-    LLM's own logs at the same moment - see ISSUES_AND_FIXES.md).
+    Both are fully synchronous, blocking calls (real requests.post() to the
+    LLM, which can legitimately take minutes for local reasoning models,
+    more so for "thinking" mode's multiple LLM calls per question) - run in
+    a thread, not directly on this async endpoint. Calling either directly
+    would block uvicorn's event loop for the whole duration, starving every
+    other request on this server including GET /health, which is exactly
+    what caused Kubernetes' liveness probe to fail and kill this pod
+    mid-request in production (confirmed via kubectl describe pod:
+    "Liveness probe failed: context deadline exceeded" during an in-flight
+    /ask call, "Client disconnected" in the LLM's own logs at the same
+    moment - see ISSUES_AND_FIXES.md).
     """
-    result = await asyncio.to_thread(answer_question, request.question)
+    if get_retrieval_mode() == "thinking":
+        result = await asyncio.to_thread(answer_question_thinking, request.question)
+    else:
+        result = await asyncio.to_thread(answer_question, request.question)
 
     return AskResponse(
         answer=result["answer"],
