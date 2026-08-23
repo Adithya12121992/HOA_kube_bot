@@ -1,20 +1,31 @@
-"""Stage 3b: Vector storage — ChromaDB (local) or Pinecone (cloud).
+"""Stage 3b: Vector storage — dual-write ChromaDB + Pinecone, toggle-read.
 
-Backend is selected by the active environment bundle (see
-src/config/settings.py): "local" -> ChromaDB, "cloud" -> Pinecone. Each
-environment is a complete, non-mixed stack — this module never writes to
-both at once.
+Chunking and embedding happen once per document regardless of environment,
+and get written to BOTH ChromaDB and Pinecone — a single upload populates
+both stores, so local vs cloud retrieval can be compared on identical data
+without re-uploading. The environment toggle (src/config/settings.py)
+controls which backend actually gets QUERIED (search()), not which one
+gets written to.
+
+ChromaDB writes are treated as required (always attempted; failure
+propagates to the caller — it's local disk with no API key, the backend
+Phase 1-2 always assumed would work). Pinecone writes are
+best-effort: if PINECONE_API_KEY isn't configured or the write fails, it's
+logged and skipped rather than failing the whole document — same
+graceful-degradation pattern as summarize.py, so a document is still
+searchable locally even if the cloud write didn't happen.
 
 Embedding model: BAAI/bge-small-en-v1.5 (loaded once at module level),
 used identically for both backends — embedding always runs locally
-regardless of which environment is active.
+regardless of which environment is active, and is computed once per
+add_chunks() call and reused for both writes (not recomputed twice).
 
 Usage:
   from src.rag.store import add_chunks, search, reset
 
-  count = add_chunks(chunks_list)   # embeds and upserts to the active backend
-  results = search("query text")    # search the active backend
-  reset()                           # clear the active backend's data
+  add_chunks(chunks_list)   # embeds once, writes to Chroma + Pinecone (if configured)
+  results = search("query text")    # searches whichever backend the toggle points at
+  reset()                           # clears both backends, keeping them in sync
 """
 
 from __future__ import annotations
@@ -45,6 +56,8 @@ from src.config.settings import (
 # Functionally harmless (confirmed: storage/search work fine either way),
 # but would spam pod logs in production otherwise.
 logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICAL)
+
+logger = logging.getLogger(__name__)
 
 CHROMA_DATA = Path(CHROMA_DB_PATH)
 COLLECTION_NAME = "hoa_chunks"
@@ -176,7 +189,7 @@ def _get_chroma_client() -> chromadb.PersistentClient:
     return _chroma_client
 
 
-def _chroma_add_chunks(chunks: list[dict]) -> int:
+def _chroma_add_chunks(chunks: list[dict], embeddings: list[list[float]]) -> int:
     client = _get_chroma_client()
     collection = client.get_or_create_collection(
         name=COLLECTION_NAME,
@@ -184,7 +197,6 @@ def _chroma_add_chunks(chunks: list[dict]) -> int:
     )
 
     chunk_texts = [chunk["text"] for chunk in chunks]
-    embeddings = _embed_texts(chunk_texts, is_query=False)
     metadatas = [_prepare_metadata(chunk, include_text=False) for chunk in chunks]
     chunk_ids = [chunk["chunk_id"] for chunk in chunks]
 
@@ -249,11 +261,8 @@ def _get_pinecone_index():
     return _pinecone_index
 
 
-def _pinecone_add_chunks(chunks: list[dict]) -> int:
+def _pinecone_add_chunks(chunks: list[dict], embeddings: list[list[float]]) -> int:
     index = _get_pinecone_index()
-
-    chunk_texts = [chunk["text"] for chunk in chunks]
-    embeddings = _embed_texts(chunk_texts, is_query=False)
 
     vectors = [
         {
@@ -302,23 +311,41 @@ def _pinecone_reset() -> None:
 
 
 def add_chunks(chunks: list[dict]) -> int:
-    """Embed chunks and add them to the active environment's vector store.
+    """Embed chunks once, write to ChromaDB (required) and Pinecone (best-effort).
+
+    A single call populates both backends, keeping them in sync so
+    local vs cloud retrieval can be compared later without re-uploading.
+    ChromaDB failures propagate (it's local disk, no reason for it to be
+    flaky) — Pinecone failures/missing config are logged and skipped, same
+    graceful-degradation pattern as summarize.py.
 
     Args:
         chunks: List of chunk records with 'chunk_id', 'text', and metadata.
 
     Returns:
-        Number of chunks added/updated.
+        Number of chunks written to ChromaDB (the always-required backend).
     """
     if not chunks:
         return 0
-    if get_environment() == "cloud":
-        return _pinecone_add_chunks(chunks)
-    return _chroma_add_chunks(chunks)
+
+    chunk_texts = [chunk["text"] for chunk in chunks]
+    embeddings = _embed_texts(chunk_texts, is_query=False)
+
+    count = _chroma_add_chunks(chunks, embeddings)
+
+    if PINECONE_API_KEY:
+        try:
+            _pinecone_add_chunks(chunks, embeddings)
+        except Exception as e:
+            logger.warning(f"Pinecone write failed (chunks still searchable via ChromaDB): {e}")
+    else:
+        logger.info("PINECONE_API_KEY not configured — skipping cloud write, chunks stored locally only")
+
+    return count
 
 
 def search(query: str, k: int = 5) -> list[dict]:
-    """Search the active environment's vector store for chunks similar to the query.
+    """Search whichever backend the environment toggle currently points at.
 
     Args:
         query: Search query (plain text; BGE prefix is added internally).
@@ -333,11 +360,10 @@ def search(query: str, k: int = 5) -> list[dict]:
 
 
 def reset() -> None:
-    """Clear the active environment's vector store."""
-    if get_environment() == "cloud":
+    """Clear both backends, so they don't drift out of sync with each other."""
+    _chroma_reset()
+    if PINECONE_API_KEY:
         _pinecone_reset()
-    else:
-        _chroma_reset()
 
 
 if __name__ == "__main__":
