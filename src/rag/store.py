@@ -1,5 +1,12 @@
 """Stage 3b: Vector storage — dual-write ChromaDB + Pinecone, toggle-read.
 
+Cloud retrieval goes through LlamaIndex's PineconeVectorStore (see
+_pinecone_search below), matching the RAG-framework-per-bundle design in
+PLAN.md/settings.py (local: plain retrieve loop, cloud: LlamaIndex).
+Writes still use the raw Pinecone SDK directly - only retrieval needed the
+framework, and reusing the same write path for both backends keeps one
+tested code path instead of two.
+
 Chunking and embedding happen once per document regardless of environment,
 and get written to BOTH ChromaDB and Pinecone — a single upload populates
 both stores, so local vs cloud retrieval can be compared on identical data
@@ -37,6 +44,8 @@ from pathlib import Path
 from typing import Optional
 
 import chromadb
+from llama_index.core.vector_stores.types import VectorStoreQuery
+from llama_index.vector_stores.pinecone import PineconeVectorStore
 from pinecone import Pinecone
 from sentence_transformers import SentenceTransformer
 
@@ -79,6 +88,7 @@ _NULLABLE_STR_FIELDS = {"article", "section_inherited"}
 _embedding_model: Optional[SentenceTransformer] = None
 _chroma_client: Optional[chromadb.PersistentClient] = None
 _pinecone_index = None
+_llama_vector_store: Optional[PineconeVectorStore] = None
 
 
 def _get_embedding_model() -> SentenceTransformer:
@@ -277,20 +287,42 @@ def _pinecone_add_chunks(chunks: list[dict], embeddings: list[list[float]]) -> i
     return len(chunks)
 
 
+def _get_llama_vector_store() -> PineconeVectorStore:
+    """Lazy-build the LlamaIndex wrapper around the existing Pinecone index.
+
+    Retrieval only (not a full VectorStoreIndex/query engine) - generation
+    still goes through llm.py's environment-aware Anthropic call, same as
+    every other retrieval path in this project, so there's no reason to let
+    LlamaIndex own synthesis too. text_key="text" matches how
+    _prepare_metadata already stores chunk text in Pinecone metadata (writes
+    still go through the raw Pinecone SDK in _pinecone_add_chunks - only the
+    cloud *retrieval* path is LlamaIndex, per the project's stated RAG
+    framework mapping in settings.py/PLAN.md).
+    """
+    global _llama_vector_store
+    if _llama_vector_store is None:
+        _llama_vector_store = PineconeVectorStore(pinecone_index=_get_pinecone_index(), text_key="text")
+    return _llama_vector_store
+
+
 def _pinecone_search(query: str, k: int) -> list[dict]:
-    index = _get_pinecone_index()
+    """Cloud retrieval via LlamaIndex's PineconeVectorStore, using this
+    project's own BGE embedding (not LlamaIndex's embedding abstraction) so
+    query-time vectors stay identical to what _pinecone_add_chunks wrote -
+    same embedding call, same tested code path, for both backends.
+    """
+    vector_store = _get_llama_vector_store()
     query_embedding = _embed_texts([query], is_query=True)[0]
 
-    result = index.query(vector=query_embedding, top_k=k, include_metadata=True)
+    result = vector_store.query(VectorStoreQuery(query_embedding=query_embedding, similarity_top_k=k))
 
     formatted_results = []
-    for match in result.matches:
-        metadata = _restore_metadata(dict(match.metadata))
-        text = metadata.pop("text", "")
+    for node, similarity, chunk_id in zip(result.nodes, result.similarities, result.ids):
+        metadata = _restore_metadata(dict(node.metadata))
         formatted_results.append({
-            "chunk_id": match.id,
-            "text": text,
-            "similarity": match.score,  # Pinecone cosine metric already returns similarity, not distance
+            "chunk_id": chunk_id,
+            "text": node.get_content(),
+            "similarity": similarity,  # Pinecone cosine metric already returns similarity, not distance
             **metadata,
         })
     return formatted_results

@@ -10,6 +10,7 @@ Documents the extract → clean → chunk pipeline has been run against, to trac
 
 | Date | Scope | Result |
 |---|---|---|
+| 2026-08-22 | LlamaIndex cloud retrieval (PineconeVectorStore), real Pinecone index, full `add_chunks`/`search`/fast/thinking pipeline | Pass. See Resolved #15 below. |
 | 2026-08-22 | Mem0 conversation memory, both backends, real 2-turn conversations end-to-end (not mocked) | Pass. See Resolved #14 below. |
 | 2026-08-22 | "Thinking" mode (corrective RAG: retrieve/grade/rewrite/generate), 3 real scenarios against real LM Studio + real ChromaDB data | Pass. See Resolved #13 below. |
 | 2026-08-22 | `/ask` event-loop-blocking fix: real concurrent test, real LM Studio call | Pass. See Resolved #12 below - a real, user-reported, in-production bug. |
@@ -53,6 +54,26 @@ _(none currently — see Won't Fix below for the one known remaining gap)_
 ---
 
 ## Resolved Issues
+
+### 15. LlamaIndex was a documentation-only label — cloud retrieval never actually used it
+**Found:** 2026-08-22, auditing `settings.py`'s "RAG framework: LlamaIndex" claim for the cloud bundle
+**Fixed:** 2026-08-22, `src/rag/store.py`, `requirements.txt`
+
+**Problem:** `settings.py` and `PLAN.md` both documented the cloud environment's RAG framework as LlamaIndex, but `requirements.txt` had no `llama-index-*` package at all — `_pinecone_search()` in `store.py` was, and always had been, a direct Pinecone SDK call. The label described an intention, not the code.
+
+**Decision:** unlike "thinking mode"/LangGraph (Resolved #13), where a real dependency was deliberately skipped because a plain loop expressed the same control flow with less machinery, this one got a real integration — user's explicit call after being shown the tradeoff, since LlamaIndex's vector-store abstraction does add genuine value here (a maintained, general query-interface layer over Pinecone) where the LangGraph case didn't (a graph library over 4 linear steps).
+
+**Fix:** Added `llama-index-core==0.12.20` + `llama-index-vector-stores-pinecone==0.4.5`. `_pinecone_search()` now builds a `PineconeVectorStore(pinecone_index=..., text_key="text")` around the existing (already-populated) Pinecone index and queries it via `VectorStoreQuery(query_embedding=..., similarity_top_k=k)`, using this project's own BGE embedding call (not LlamaIndex's embedding abstraction) so query-time vectors stay identical to what `_pinecone_add_chunks()` already writes — one tested embedding path for both backends, matching the module's existing design principle. Scoped to *retrieval only*: writes still go through the raw Pinecone SDK (`_pinecone_add_chunks`/`_pinecone_reset`, unchanged), and generation still goes through `llm.py`'s environment-aware Anthropic call — LlamaIndex doesn't own synthesis, consistent with every other retrieval path in this project already separating "get chunks" from "generate answer."
+
+**Dependency conflict found along the way:** `llama-index-vector-stores-pinecone==0.4.5` requires `pinecone<7.0.0`, but this project had `pinecone==9.1.0` pinned. Downgraded to `pinecone==6.0.2` — re-verified `add_chunks()`/`search()`/`reset()` against the real index afterward; no behavior change, since the project only uses the parts of the Pinecone SDK surface (`Pinecone(api_key=...)`, `pc.Index(name)`, `index.upsert`/`query`/`delete`) that are stable across that version range.
+
+**Verification (real, not mocked — 73 real vectors already in the live `hoa-documents` Pinecone index from earlier sessions):**
+- Raw `PineconeVectorStore.query()` sanity check: same top-3 results and same similarity scores as the pre-change direct-SDK call, for the query "board meetings."
+- `store.search()` (public API, cloud mode): 3 results, metadata correctly round-tripped through `_restore_metadata` (JSON-decoded `sections` list, correct `article`/`page_start`/etc.), matching pre-change output shape exactly.
+- `query.answer_question()` full pipeline (LlamaIndex retrieval → Anthropic generation): correct, cited answer to "When are board meetings held?"
+- `thinking.answer_question_thinking()` full pipeline: correct trace (`retrieve → grade → generate`) with LlamaIndex-backed retrieval feeding the corrective-RAG grading/generation steps.
+- Round-trip write check: `add_chunks()` (dual-write, unchanged code path) followed immediately by a cloud `search()` for the new chunk — found it, with correct metadata (`article: "IX"`), confirming the LlamaIndex retrieval path sees writes made via the raw-SDK write path with no format mismatch.
+- Test chunks (`test:chunk_0`, `llamaidx-verify:chunk_0`) deleted from the real Pinecone index afterward.
 
 ### 14. Mem0 wiring: real API contract differs from the naive-obvious call shape, plus a pydantic conflict
 **Found:** 2026-08-22, while wiring `src/rag/memory.py` into `query.py`/`thinking.py`

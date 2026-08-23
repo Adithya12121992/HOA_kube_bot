@@ -30,7 +30,18 @@ numpy==1.26.4
 cryptography==42.0.5
 
 # Phase 3: Cloud environment bundle (Pinecone storage)
-pinecone==9.1.0
+# pinecone pinned to <7.0.0 here (down from the 9.1.0 this project started
+# with) because llama-index-vector-stores-pinecone 0.4.5 requires
+# pinecone>=3.2.2,<7.0.0. Re-verified add_chunks()/search()/reset() against
+# the real index after the downgrade - no behavior change, same API surface
+# this project actually uses (Pinecone(api_key=...), pc.Index(name),
+# index.upsert/query/delete).
+pinecone==6.0.2
 
 # Phase 5: Conversation memory (cloud environment bundle)
 mem0ai==2.0.18
+
+# Phase 5: RAG framework, cloud bundle (real LlamaIndex retrieval over the
+# existing Pinecone index, replacing the direct-SDK-only cloud search path)
+llama-index-core==0.12.20
+llama-index-vector-stores-pinecone==0.4.5
