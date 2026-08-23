@@ -1,0 +1,12 @@
+# Test-only tooling - not installed in production Docker images (see
+# docker/*.dockerfile, which only install requirements.txt).
+pytest==8.3.3
+pytest-mock==3.14.0
+
+# Pinned below mem0ai's declared floor (httpx>=0.28.0) deliberately: FastAPI's
+# TestClient (starlette 0.27.0, the version this project's fastapi==0.100.1
+# pulls in) still uses the old `httpx.Client(app=...)` constructor argument,
+# removed in httpx 0.28. Production installs (requirements.txt, no httpx
+# pin) are unaffected - confirmed the built Docker image resolves httpx
+# 0.28.1 independently, since TestClient is never imported/run there.
+httpx==0.27.2

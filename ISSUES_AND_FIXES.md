@@ -10,6 +10,7 @@ Documents the extract → clean → chunk pipeline has been run against, to trac
 
 | Date | Scope | Result |
 |---|---|---|
+| 2026-08-22 | Automated test suite (69 tests: unit + integration, `pytest tests/`) built and run against real ChromaDB/real embedding model/real FastAPI routing | Pass, after finding and fixing a real bug in the test harness itself - see Resolved #16 below. |
 | 2026-08-22 | Full deploy verification: rebuilt both Docker images (thinking mode + Mem0 + LlamaIndex), `k3d image import`, rolling restart, real `/ask` calls through the live Ingress (`http://localhost:8000`) | Pass. Both pods `1/1 Running`, 0 restarts. CPU-only torch (`2.13.0+cpu`) confirmed still present in both rebuilt images. Two real cloud+thinking-mode questions through the actual deployed pod, second correctly recalling the first via Mem0 (`memories_used: 5`), citing real CC&Rs content with correct page numbers both times. |
 | 2026-08-22 | LlamaIndex cloud retrieval (PineconeVectorStore), real Pinecone index, full `add_chunks`/`search`/fast/thinking pipeline | Pass. See Resolved #15 below. |
 | 2026-08-22 | Mem0 conversation memory, both backends, real 2-turn conversations end-to-end (not mocked) | Pass. See Resolved #14 below. |
@@ -55,6 +56,22 @@ _(none currently — see Won't Fix below for the one known remaining gap)_
 ---
 
 ## Resolved Issues
+
+### 16. Automated test suite (Phase 6): frozen-import bug in the test harness itself, plus a FastAPI TestClient/httpx version conflict
+**Found:** 2026-08-22, while building `tests/` (69 tests: unit + integration)
+**Fixed:** 2026-08-22, `tests/conftest.py`, `requirements-dev.txt`
+
+**Scope:** unit tests (pure logic, no I/O) for `chunk.py`, `clean.py`, `store.py`'s metadata encode/decode, `settings.py`'s config toggle, and `memory.py`'s local session backend — plus integration tests against a real ChromaDB instance and real BGE embeddings (add/search/reset round trip, metadata round trip), the fast and thinking-mode answer pipelines (real retrieval, LLM call itself mocked at the boundary), and the FastAPI service via `TestClient` (real routing, real config toggle, real retrieval). No mocking of anything except the actual outbound LLM network call — real ChromaDB, real embeddings, real HTTP routing throughout.
+
+**Problem 1 (real, found while writing the tests, not a pre-existing production bug):** `query.py`/`thinking.py`/`memory.py` all do `from src.rag.store import search` / `from src.config.settings import get_environment` — name bindings frozen to whichever module *instance* existed at first import, same class of issue as the config-propagation bug (Resolved #11), but for function references instead of a config value. In real deployment this never matters (each process imports once). But the first test run surfaced it immediately: with an `isolated_data_dir` pytest fixture that reloaded `settings`/`store` fresh per test (fresh temp ChromaDB path each time) but left `query`/`thinking`/`memory` cached from an earlier test's import, those modules kept calling the *previous* test's `store.search`, bound to a stale (sometimes already-torn-down) ChromaDB path — chunks seeded in the current test were invisible to it. Symptoms: `search()` silently returning `[]` for data that was definitely just written, corrective-RAG grading looping into unnecessary rewrites because retrieval looked empty, and thinking-mode's "grade against nothing" fallback path exercising when it shouldn't have.
+
+**Fix:** `isolated_data_dir` (`tests/conftest.py`) now reloads the full dependency chain together — `settings` → `store` → `memory` → `query` → `thinking` — every test, not just `settings`/`store`. `tests/integration/test_service_api.py`'s `api_client` fixture does the same one level up, adding `src.services.chatbot.service` to the reload set (it does the identical `from src.rag.query import answer_question`-style frozen import).
+
+**Problem 2 (tooling version conflict, not a code bug):** FastAPI's `TestClient` (via `starlette==0.27.0`, pulled in by this project's `fastapi==0.100.1`) still constructs `httpx.Client(app=...)` — the `app=` shortcut was removed in `httpx==0.28`, which is what `mem0ai>=2.7.3` requires as a floor. Installing a fresh `httpx` in the dev venv for testing picked 0.28.1 and broke every `TestClient`-based test with `TypeError: Client.__init__() got an unexpected keyword argument 'app'`.
+
+**Fix:** added `requirements-dev.txt` (test-only tooling, not installed in Docker images) pinning `httpx==0.27.2` below mem0ai's floor, since `TestClient` is only ever imported in tests, never in the actual service. Confirmed production is unaffected: `requirements.txt` doesn't pin `httpx` at all, and the built `hoa-bot` Docker image independently resolves `httpx==0.28.1` (satisfying mem0ai) since `TestClient` is never imported there — verified directly (`docker run --rm hoa-bot:latest pip show httpx`).
+
+**Result: 69/69 passing** (`pytest tests/` — 46 unit, 23 integration), run together in one process (the scenario that surfaced Problem 1 in the first place) as well as individually per file.
 
 ### 15. LlamaIndex was a documentation-only label — cloud retrieval never actually used it
 **Found:** 2026-08-22, auditing `settings.py`'s "RAG framework: LlamaIndex" claim for the cloud bundle
