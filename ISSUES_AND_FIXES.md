@@ -10,6 +10,7 @@ Documents the extract → clean → chunk pipeline has been run against, to trac
 
 | Date | Scope | Result |
 |---|---|---|
+| 2026-08-22 | Full deploy verification: rebuilt both Docker images (thinking mode + Mem0 + LlamaIndex), `k3d image import`, rolling restart, real `/ask` calls through the live Ingress (`http://localhost:8000`) | Pass. Both pods `1/1 Running`, 0 restarts. CPU-only torch (`2.13.0+cpu`) confirmed still present in both rebuilt images. Two real cloud+thinking-mode questions through the actual deployed pod, second correctly recalling the first via Mem0 (`memories_used: 5`), citing real CC&Rs content with correct page numbers both times. |
 | 2026-08-22 | LlamaIndex cloud retrieval (PineconeVectorStore), real Pinecone index, full `add_chunks`/`search`/fast/thinking pipeline | Pass. See Resolved #15 below. |
 | 2026-08-22 | Mem0 conversation memory, both backends, real 2-turn conversations end-to-end (not mocked) | Pass. See Resolved #14 below. |
 | 2026-08-22 | "Thinking" mode (corrective RAG: retrieve/grade/rewrite/generate), 3 real scenarios against real LM Studio + real ChromaDB data | Pass. See Resolved #13 below. |
