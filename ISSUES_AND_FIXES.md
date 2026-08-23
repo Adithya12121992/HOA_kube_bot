@@ -10,6 +10,8 @@ Documents the extract → clean → chunk pipeline has been run against, to trac
 
 | Date | Scope | Result |
 |---|---|---|
+| 2026-08-22 | Dual-write `add_chunks()` against real ChromaDB + real Pinecone, redeployed to K8s | Pass. One real chunk written once, confirmed independently searchable from both backends with matching similarity scores (0.715 / 0.714) after flipping the environment toggle between calls. `reset()` confirmed clearing both. Both pods redeployed and stable after the change. |
+| 2026-08-22 | Config toggle cross-process propagation, real test | Found and fixed a real bug — see Resolved #11 below. Verified both the single-process and cross-process/pod cases separately. |
 | 2026-08-22 | Full K8s deployment (real `docker build` → `k3d image import` → `kubectl rollout`), consumer + hoa-bot pods | Found and fixed a real bug — see Resolved #10 below. Both pods stable at `1/1 Running`, 0 restarts, after the fix. |
 | 2026-08-22 | Full `/ask` HTTP endpoint on a live running server (real `uvicorn` process, real HTTP POST, not a direct function call): populated ChromaDB with real chunked data, asked two real questions | Pass. Accurate answers, correct source citations (`[1]` matched the actually-relevant chunk by page range), sources/metadata correctly shaped in the response. One question's answer had a stray `"space\n\n\n\n"` prefix before the real content — re-asked a different question and it didn't recur, confirming non-deterministic local reasoning-model output noise, not a bug in prompt construction or response parsing (same category as the earlier qwen3 empty-content finding, intermittent instead of consistent this time). |
 | 2026-08-22 | `summarize.py` cloud LLM path (`ENVIRONMENT=cloud`) against the real Anthropic API | Pass — accurate, on-topic 2-line summary generated via the default model (`claude-sonnet-4-5`), confirming Anthropic tried first per `CLOUD_LLM_FALLBACK_ORDER` and succeeded (no fallback-to-OpenAI warning logged). OpenAI itself separately confirmed reachable but blocked by the account's `insufficient_quota` (no billing configured) — not a code issue, see note below the Pinecone entries. Fallback chain behaved correctly either way: warned and returned `None` instead of raising when OpenAI failed, before Anthropic was retried with the corrected key. |
@@ -48,6 +50,22 @@ _(none currently — see Won't Fix below for the one known remaining gap)_
 ---
 
 ## Resolved Issues
+
+### 11. Config toggle frozen at import time, and not shared across pods
+**Found:** 2026-08-22, investigating why an uploaded doc only appeared in ChromaDB, not Pinecone
+**Fixed:** 2026-08-22, `src/config/settings.py`, `src/rag/store.py`, `src/rag/llm.py`
+
+**Problem:** Two compounding bugs, found while investigating a user-reported issue ("I uploaded a doc, it inserted into Chroma but not Pinecone"):
+
+1. **Single-process:** `store.py` and `llm.py` both did `from src.config.settings import ENVIRONMENT` — Python's `from module import NAME` copies the value at import time. `update_config()`'s `global ENVIRONMENT; ENVIRONMENT = ...` reassigns `settings.py`'s own module-level name, but `store.py`/`llm.py`'s already-bound local names never see that reassignment. Toggling via `POST /config` updated `settings.py`'s own state but `store.py`/`llm.py` silently kept using whatever `ENVIRONMENT` was at their import time — forever, even within the same process.
+2. **Cross-process:** `consumer` and `hoa-bot` are separate pods with no shared memory anyway, so even fixing bug 1 alone wouldn't make a toggle in `hoa-bot`'s UI reach `consumer`, which is what actually does the embedding/storage.
+
+**Fix:** Replaced the plain-global pattern with a shared config file on the PVC (same pattern as `src/rag/status.py`) as the single source of truth. `get_environment()`/`get_retrieval_mode()` read it fresh on every call — callers must call the function, not import a frozen value. `update_config()` writes to the same file. `store.py` and `llm.py` now call `get_environment()` at the point of use instead of importing `ENVIRONMENT` as a value.
+
+**Verification:**
+- Single-process: called `update_config(environment="cloud")`, confirmed `store.py`'s and `llm.py`'s `get_environment()` immediately reflected `"cloud"` in the same process (previously would have stayed `"local"` forever)
+- Cross-process: after that toggle, started a completely separate Python process and confirmed it also read `"cloud"` from the shared file
+- Cross-pod (real K8s): toggled via `hoa-bot`'s actual `/config` HTTP endpoint, confirmed via `kubectl exec` into the `consumer` pod that it picked up the same value
 
 ### 10. `cryptography==50.0.0` crashes with SIGILL on arm64 under Docker Desktop
 **Found:** 2026-08-22, first real K8s deployment attempt with the full pipeline built into containers
