@@ -50,10 +50,18 @@ spec:
           value: "/data/.chroma_data"
         - name: DATA_DIR
           value: "/data"
+        - name: CHUNKS_JSON_PATH
+          value: "/data/chunks.json"
         - name: LM_STUDIO_BASE_URL
-          value: "http://host.k3d.internal:1234/v1"  # LM Studio runs on host machine
+          value: "http://host.k3d.internal:1234/v1"  # LM Studio runs on host machine; verified reachable from k3d pods
         - name: LM_STUDIO_MODEL
-          value: "local-model"
+          value: "qwen/qwen3-14b"  # must match a model actually loaded in LM Studio
+        - name: LM_STUDIO_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: lmstudio-secret
+              key: api-key
+              optional: true
         # --- Cloud environment stack (only needed when ENVIRONMENT=cloud) ---
         - name: PINECONE_API_KEY
           valueFrom:
@@ -85,12 +93,15 @@ spec:
         - name: shared-storage
           mountPath: /data
         resources:
+          # Same embedding model loaded here too (for /ask's query embedding),
+          # plus FastAPI/uvicorn overhead - the original Phase 1 limit
+          # (512Mi, before embedding was wired in) would OOM-kill this pod.
           requests:
-            memory: "256Mi"
-            cpu: "200m"
+            memory: "768Mi"
+            cpu: "250m"
           limits:
-            memory: "512Mi"
-            cpu: "500m"
+            memory: "1.5Gi"
+            cpu: "1000m"
         livenessProbe:
           httpGet:
             path: /health

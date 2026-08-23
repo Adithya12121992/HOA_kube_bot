@@ -36,16 +36,66 @@ spec:
               key: password
         - name: RABBITMQ_QUEUE
           value: "test_queue"
+        # Configuration toggles (must match hoa-bot's, both share the same store)
+        - name: ENVIRONMENT
+          value: "local"  # "local" or "cloud" - each is a full bundled stack
+        # --- Local environment stack ---
+        - name: CHROMA_DB_PATH
+          value: "/data/.chroma_data"
+        - name: DATA_DIR
+          value: "/data"
+        - name: CHUNKS_JSON_PATH
+          value: "/data/chunks.json"
+        - name: LM_STUDIO_BASE_URL
+          value: "http://host.k3d.internal:1234/v1"  # LM Studio runs on host machine; verified reachable from k3d pods
+        - name: LM_STUDIO_MODEL
+          value: "qwen/qwen3-14b"  # must match a model actually loaded in LM Studio
+        - name: LM_STUDIO_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: lmstudio-secret
+              key: api-key
+              optional: true
+        # --- Cloud environment stack (only needed when ENVIRONMENT=cloud) ---
+        - name: PINECONE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: pinecone-secret
+              key: api-key
+              optional: true
+        - name: MEM0_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: mem0-secret
+              key: api-key
+              optional: true
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-secret
+              key: anthropic-api-key
+              optional: true
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-secret
+              key: openai-api-key
+              optional: true
+        - name: LOG_LEVEL
+          value: "INFO"
         volumeMounts:
         - name: shared-storage
           mountPath: /data
         resources:
+          # torch + sentence-transformers (BGE embedding model) need real
+          # headroom to load - 256Mi (the original Phase 1 limit, before
+          # embedding was wired in) would OOM-kill this pod immediately.
           requests:
-            memory: "128Mi"
-            cpu: "100m"
+            memory: "768Mi"
+            cpu: "250m"
           limits:
-            memory: "256Mi"
-            cpu: "200m"
+            memory: "1.5Gi"
+            cpu: "1000m"
         restartPolicy: Always
       volumes:
       - name: shared-storage

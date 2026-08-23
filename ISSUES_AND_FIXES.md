@@ -10,6 +10,7 @@ Documents the extract → clean → chunk pipeline has been run against, to trac
 
 | Date | Scope | Result |
 |---|---|---|
+| 2026-08-22 | Full K8s deployment (real `docker build` → `k3d image import` → `kubectl rollout`), consumer + hoa-bot pods | Found and fixed a real bug — see Resolved #10 below. Both pods stable at `1/1 Running`, 0 restarts, after the fix. |
 | 2026-08-22 | Full `/ask` HTTP endpoint on a live running server (real `uvicorn` process, real HTTP POST, not a direct function call): populated ChromaDB with real chunked data, asked two real questions | Pass. Accurate answers, correct source citations (`[1]` matched the actually-relevant chunk by page range), sources/metadata correctly shaped in the response. One question's answer had a stray `"space\n\n\n\n"` prefix before the real content — re-asked a different question and it didn't recur, confirming non-deterministic local reasoning-model output noise, not a bug in prompt construction or response parsing (same category as the earlier qwen3 empty-content finding, intermittent instead of consistent this time). |
 | 2026-08-22 | `summarize.py` cloud LLM path (`ENVIRONMENT=cloud`) against the real Anthropic API | Pass — accurate, on-topic 2-line summary generated via the default model (`claude-sonnet-4-5`), confirming Anthropic tried first per `CLOUD_LLM_FALLBACK_ORDER` and succeeded (no fallback-to-OpenAI warning logged). OpenAI itself separately confirmed reachable but blocked by the account's `insufficient_quota` (no billing configured) — not a code issue, see note below the Pinecone entries. Fallback chain behaved correctly either way: warned and returned `None` instead of raising when OpenAI failed, before Anthropic was retried with the corrected key. |
 | 2026-08-22 | Pinecone backend (`ENVIRONMENT=cloud`) against the real Pinecone index: `add_chunks()` → `search()` → `reset()`, including the sections/page_start/article metadata round-trip check | Pass. See Resolved #9 below — one real (non-blocking) finding along the way. |
@@ -47,6 +48,31 @@ _(none currently — see Won't Fix below for the one known remaining gap)_
 ---
 
 ## Resolved Issues
+
+### 10. `cryptography==50.0.0` crashes with SIGILL on arm64 under Docker Desktop
+**Found:** 2026-08-22, first real K8s deployment attempt with the full pipeline built into containers
+**Fixed:** 2026-08-22, `requirements.txt` — pinned `cryptography==42.0.5`
+
+**Problem:** The `consumer` pod crashed immediately on every startup (`CrashLoopBackOff`, exit code 132 — SIGILL, illegal instruction) before processing anything, before even printing its own first log line. `hoa-bot` didn't crash at the time only because it hadn't yet exercised the same code path (lazy imports).
+
+**Root cause, isolated by bisection** (tested each layer directly via `docker run`, narrowing from "the whole app crashes" down to one line):
+1. `src.services.consumer.app` import → crash
+2. → `src.rag.extract` import → crash
+3. → `pdfplumber` import → crash
+4. → `pdfminer.high_level` → crash (but `import pdfminer` alone was fine)
+5. → every `pdfminer.*` submodule (`converter`, `image`, `layout`, `pdfdevice`, `pdfinterp`, `pdfpage`) → crash
+6. → isolated to `from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes` specifically (used by `pdfminer.six` for encrypted-PDF support)
+
+Confirmed host and container architecture matched (`arm64` both sides — not a QEMU/Rosetta cross-emulation issue). `cryptography` alone (bare `import cryptography`) worked fine; only the `hazmat.primitives.ciphers` submodule — which does AES hardware-acceleration detection at import time — crashed. This points to a genuine bug in that specific `cryptography` release's ARM64 build under Docker Desktop's virtualized Linux VM, not a general ARM64 incompatibility (unpinned `pip install` picked up `50.0.0`, the latest at the time — nothing in `requirements.txt` had pinned it, since it's a transitive dependency of `pdfplumber` → `pdfminer.six`).
+
+**Fix:** Pinned `cryptography==42.0.5` explicitly in `requirements.txt`. Verified directly (before committing to a full rebuild): `pip install --force-reinstall cryptography==42.0.5` inside the already-built broken image, then re-ran the exact AES cipher instantiation that crashed — worked cleanly. Rebuilt both images properly with the pin, redeployed: both `consumer` and `hoa-bot` pods stable at `1/1 Running`, 0 restarts.
+
+**Also fixed while investigating this deployment (same session, adjacent real gaps found before the crash):**
+- `k8s/hoa-bot-deployment.yaml` and `k8s/consumer-deployment.yaml` were missing most of the environment/secret wiring the pipeline actually needs now (`LM_STUDIO_API_KEY` wasn't in the manifest at all — even local mode would have 401'd against the user's real LM Studio, which requires a Bearer token; `LM_STUDIO_MODEL` was a placeholder `"local-model"` string that doesn't match any real loaded model; `consumer-deployment.yaml` had none of the storage/LLM env vars at all, just RabbitMQ). Added all of it, matching what `hoa-bot` needed.
+- The K8s Secrets referenced by the deployment manifests (`pinecone-secret`, `mem0-secret`, `llm-secret`) never actually existed in the cluster — created them for real from the user's `.env` values.
+- Verified `host.k3d.internal` (used to reach the user's LM Studio server running on the host machine) is actually reachable from inside a pod — confirmed via a throwaway `curl` pod (got a `401` from LM Studio, meaning the network path works, auth is what's missing without the token).
+- Resource limits (`256Mi`/`512Mi`, from Phase 1 before embedding was wired in) were too low for `torch` + `sentence-transformers` to load — bumped to `768Mi` request / `1.5Gi` limit on both pods.
+- Docker images were 9-9.5GB (`pip install torch` pulls the full CUDA-enabled build by default, unnecessary for CPU-only inference in these containers). Installed the CPU-only torch wheel first (`--index-url https://download.pytorch.org/whl/cpu`) so `sentence-transformers`' dependency resolution sees it already satisfied — brought images down to 2.2-2.75GB (~4x smaller), meaningfully faster `k3d image import` and pod startup.
 
 ### 9. Pinecone `fetch()`-by-ID unreliable for chunk_ids with special characters
 **Found:** 2026-08-22, verifying the new Pinecone storage backend's metadata round-trip against real CC&Rs chunks
