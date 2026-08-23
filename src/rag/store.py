@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -87,16 +88,29 @@ _NULLABLE_STR_FIELDS = {"article", "section_inherited"}
 # Global embedding model + backend clients (loaded/connected once).
 # ChromaDB is deliberately NOT cached here - see _get_chroma_client().
 _embedding_model: Optional[SentenceTransformer] = None
+_embedding_model_lock = threading.Lock()
 _pinecone_index = None
 _llama_vector_store: Optional[PineconeVectorStore] = None
 
 
 def _get_embedding_model() -> SentenceTransformer:
-    """Lazy-load the embedding model on first use."""
+    """Lazy-load the embedding model on first use.
+
+    Locked: consumer processes documents with multiple concurrent worker
+    threads, and an unsynchronized "if None: construct" check here let two
+    threads both see None and race to build SentenceTransformer(...)
+    concurrently - confirmed as a real bug (RuntimeError: "Cannot copy out
+    of meta tensor; no data!") the first time two documents happened to hit
+    this cold-start path at the same moment. The double-checked lock avoids
+    holding the lock (and blocking every embed call) once the model is
+    already loaded.
+    """
     global _embedding_model
     if _embedding_model is None:
-        print(f"Loading embedding model {EMBEDDING_MODEL} (first time only)...")
-        _embedding_model = SentenceTransformer(EMBEDDING_MODEL)
+        with _embedding_model_lock:
+            if _embedding_model is None:
+                print(f"Loading embedding model {EMBEDDING_MODEL} (first time only)...")
+                _embedding_model = SentenceTransformer(EMBEDDING_MODEL)
     return _embedding_model
 
 

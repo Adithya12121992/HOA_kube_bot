@@ -1,3 +1,4 @@
+import functools
 import pika
 import json
 import os
@@ -21,10 +22,40 @@ from src.rag.summarize import summarize_document
 import src.rag.store as store
 
 # Concurrency settings
-MAX_CONCURRENT_MESSAGES = 3
+#
+# Two compounding bugs found at the original MAX_CONCURRENT_MESSAGES=3:
+# (1) worker threads called channel.basic_ack()/basic_nack() directly -
+# pika's BlockingConnection/channel is not safe to touch from any thread
+# other than the one running channel.start_consuming()'s I/O loop, lock or
+# not, causing real "Channel is closed" / "IndexError('pop from an empty
+# deque')" errors and duplicate reprocessing of already-completed (and
+# already-deleted) files. Reducing concurrency only reduces how often this
+# race triggers, it doesn't eliminate it - the race is between one worker
+# thread and the main I/O thread, not between multiple workers. Fixed for
+# real via connection.add_callback_threadsafe() (see ack_message/
+# nack_message below), which schedules the ack/nack onto the connection's
+# own I/O thread instead of calling channel methods from a worker thread.
+# (2) concurrent workers each loading the embedding model + processing a
+# PDF + calling the LLM can exceed this pod's memory limit and trigger a
+# real OOMKill (confirmed via `kubectl describe pod`, Restart Count
+# incrementing). That's a separate, resource-limit issue, not fixed by the
+# threading change above - kept at 2 (not 3) until the pod's memory limit is
+# raised to safely support more concurrent heavy workers.
+MAX_CONCURRENT_MESSAGES = 2
 executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_MESSAGES)
-channel_lock = threading.Lock()  # Thread-safe channel operations
 chunks_json_lock = threading.Lock()  # Thread-safe chunks.json append
+
+
+def ack_message(channel, delivery_tag):
+    """Runs on the connection's own I/O thread via add_callback_threadsafe - see callers."""
+    if channel.is_open:
+        channel.basic_ack(delivery_tag=delivery_tag)
+
+
+def nack_message(channel, delivery_tag, requeue):
+    """Runs on the connection's own I/O thread via add_callback_threadsafe - see callers."""
+    if channel.is_open:
+        channel.basic_nack(delivery_tag=delivery_tag, requeue=requeue)
 
 # Embed+store in batches so status.chunks_done reflects real progress
 # instead of jumping straight from 0 to chunks_total.
@@ -49,7 +80,7 @@ def _append_chunks_json(chunks: list[dict]) -> None:
         path.write_text(json.dumps(existing, indent=2, ensure_ascii=False))
 
 
-def process_message(message_data, delivery_tag, channel):
+def process_message(message_data, delivery_tag, channel, connection):
     """Process a single uploaded document: extract -> chunk -> embed -> store -> summarize."""
     thread_name = threading.current_thread().name
     doc_id = message_data.get("doc_id")
@@ -101,21 +132,19 @@ def process_message(message_data, delivery_tag, channel):
         except OSError as e:
             print(f"  ⚠️  [Thread-{thread_name}] Error deleting file {file_path}: {e}")
 
-        with channel_lock:
-            channel.basic_ack(delivery_tag=delivery_tag)
+        connection.add_callback_threadsafe(functools.partial(ack_message, channel, delivery_tag))
         print(f"✓ [Thread-{thread_name}] Message {delivery_tag} processed successfully — {filename} is ready")
 
     except Exception as e:
         print(f"✗ [Thread-{thread_name}] Error processing message {delivery_tag}: {e}")
         if doc_id:
             write_status(doc_id, filename, stage="error", error_message=str(e))
-        with channel_lock:
-            # requeue=False: a processing failure (bad PDF, corrupt file, etc)
-            # is not transient - requeuing would just loop forever reprocessing
-            # the same broken message. Transient issues (connection loss) are
-            # handled separately by consume_messages()'s reconnect logic, not
-            # by nacking individual messages.
-            channel.basic_nack(delivery_tag=delivery_tag, requeue=False)
+        # requeue=False: a processing failure (bad PDF, corrupt file, etc) is
+        # not transient - requeuing would just loop forever reprocessing the
+        # same broken message. Transient issues (connection loss) are handled
+        # separately by consume_messages()'s reconnect logic, not by nacking
+        # individual messages.
+        connection.add_callback_threadsafe(functools.partial(nack_message, channel, delivery_tag, False))
 
 
 def get_queue_message_count():
@@ -173,21 +202,26 @@ def consume_messages():
             channel.basic_qos(prefetch_count=MAX_CONCURRENT_MESSAGES)
 
             def callback(ch, method, properties, body):
-                """Handle incoming message - process concurrently"""
+                """Handle incoming message - process concurrently.
+
+                Runs on the connection's own I/O thread (pika invokes it
+                directly from start_consuming()'s loop), so channel calls
+                here are safe without add_callback_threadsafe - only calls
+                made from the worker threads process_message() runs on need it.
+                """
                 try:
                     message = json.loads(body)
                     print(f"\n📨 Message {method.delivery_tag} received, queued for processing")
 
                     # Submit to thread pool for concurrent processing
-                    executor.submit(process_message, message, method.delivery_tag, ch)
+                    executor.submit(process_message, message, method.delivery_tag, ch, connection)
 
                 except Exception as e:
                     print(f"Error queuing message: {e}")
-                    with channel_lock:
-                        try:
-                            channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
-                        except:
-                            pass
+                    try:
+                        channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                    except Exception:
+                        pass
 
             # Consume with auto_ack=False
             channel.basic_consume(
