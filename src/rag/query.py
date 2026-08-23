@@ -9,22 +9,30 @@ Source/AnswerResult/_build_context from this module. This module covers
 from __future__ import annotations
 
 import time
-from typing import TypedDict
+from typing import Optional, TypedDict
 
 from src.rag.llm import generate
+from src.rag.memory import add_memory, get_relevant_memories
 from src.rag.store import search
 
 TOP_K = 8
 ANSWER_MAX_TOKENS = 1000
 
 _PROMPT_TEMPLATE = """You are answering a question about HOA (homeowners association) documents, using only the excerpts below. If the excerpts don't contain enough information to answer, say so — do not use outside knowledge.
-
+{memory_block}
 Excerpts:
 {context}
 
 Question: {question}
 
 Answer concisely, and reference sources by their [N] marker where relevant."""
+
+
+def _format_memory_block(memories: list[str]) -> str:
+    if not memories:
+        return ""
+    joined = "\n".join(f"- {m}" for m in memories)
+    return f"\nRelevant context from earlier in this conversation:\n{joined}\n"
 
 
 class Source(TypedDict):
@@ -50,8 +58,14 @@ def _build_context(chunks: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
-def answer_question(question: str, k: int = TOP_K) -> AnswerResult:
+def answer_question(question: str, k: int = TOP_K, user_id: Optional[str] = None) -> AnswerResult:
     """Retrieve relevant chunks and generate a grounded answer.
+
+    user_id, if provided, pulls relevant memories from the active
+    environment's memory backend (Mem0 for cloud, a simple in-process
+    session for local — see src/rag/memory.py) as extra context, and
+    records this turn for future questions. Optional: memory is an
+    enhancement, not a dependency — omitting user_id just skips it.
 
     Returns an answer even if no LLM is reachable — in that case `answer`
     explains the failure rather than raising, since this is a user-facing
@@ -69,12 +83,17 @@ def answer_question(question: str, k: int = TOP_K) -> AnswerResult:
             metadata={"latency_ms": round((time.time() - start_time) * 1000, 2), "chunks_searched": 0},
         )
 
+    memories = get_relevant_memories(user_id, question)
     context = _build_context(chunks)
-    prompt = _PROMPT_TEMPLATE.format(context=context, question=question)
+    prompt = _PROMPT_TEMPLATE.format(
+        memory_block=_format_memory_block(memories), context=context, question=question
+    )
     answer = generate(prompt, max_tokens=ANSWER_MAX_TOKENS)
 
     if answer is None:
         answer = "I found relevant documents, but couldn't reach the language model to generate an answer. Please try again."
+    else:
+        add_memory(user_id, question, answer)
 
     sources = [
         Source(
@@ -93,5 +112,5 @@ def answer_question(question: str, k: int = TOP_K) -> AnswerResult:
     return AnswerResult(
         answer=answer,
         sources=sources,
-        metadata={"latency_ms": latency_ms, "chunks_searched": len(chunks)},
+        metadata={"latency_ms": latency_ms, "chunks_searched": len(chunks), "memories_used": len(memories)},
     )

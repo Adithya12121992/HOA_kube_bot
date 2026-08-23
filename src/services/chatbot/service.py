@@ -105,9 +105,9 @@ async def ask_question(request: AskRequest) -> AskResponse:
     moment - see ISSUES_AND_FIXES.md).
     """
     if get_retrieval_mode() == "thinking":
-        result = await asyncio.to_thread(answer_question_thinking, request.question)
+        result = await asyncio.to_thread(answer_question_thinking, request.question, user_id=request.user_id)
     else:
-        result = await asyncio.to_thread(answer_question, request.question)
+        result = await asyncio.to_thread(answer_question, request.question, user_id=request.user_id)
 
     return AskResponse(
         answer=result["answer"],

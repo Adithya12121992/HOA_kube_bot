@@ -21,9 +21,10 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import TypedDict
+from typing import Optional, TypedDict
 
 from src.rag.llm import generate
+from src.rag.memory import add_memory, get_relevant_memories
 from src.rag.query import Source, AnswerResult, _build_context
 from src.rag.store import search
 
@@ -130,14 +131,18 @@ def _rewrite_query(question: str) -> str:
     return _strip_think_tags(response)
 
 
-def _generate_answer(original_question: str, chunks: list[dict], relevant_indices: list[int]) -> str:
+def _generate_answer(original_question: str, chunks: list[dict], relevant_indices: list[int], memories: list[str]) -> str:
     if relevant_indices:
         relevant_chunks = [chunks[i] for i in relevant_indices if i < len(chunks)]
     else:
         relevant_chunks = chunks  # fallback: use everything retrieved, let the model judge
 
     context = _build_context(relevant_chunks) if relevant_chunks else "(no documents retrieved)"
-    prompt = f"{GENERATE_SYSTEM_PROMPT}\n\n{context}\n\nQuestion: {original_question}"
+    memory_block = ""
+    if memories:
+        joined = "\n".join(f"- {m}" for m in memories)
+        memory_block = f"\nRelevant context from earlier in this conversation:\n{joined}\n"
+    prompt = f"{GENERATE_SYSTEM_PROMPT}\n{memory_block}\n{context}\n\nQuestion: {original_question}"
 
     answer = generate(prompt, max_tokens=ANSWER_MAX_TOKENS, temperature=0)
     if answer is None:
@@ -145,13 +150,17 @@ def _generate_answer(original_question: str, chunks: list[dict], relevant_indice
     return _strip_think_tags(answer)
 
 
-def answer_question_thinking(question: str, k: int = TOP_K) -> AnswerResult:
+def answer_question_thinking(question: str, k: int = TOP_K, user_id: Optional[str] = None) -> AnswerResult:
     """Corrective RAG: retrieve -> grade -> rewrite (up to MAX_REWRITES) -> generate.
 
     Unlike fast mode (src/rag/query.py), this grades retrieved chunks for
     relevance before generating, and reformulates the query and re-retrieves
     if grading found nothing sufficient - trading latency for higher
     precision on ambiguous or colloquially-phrased questions.
+
+    user_id, if provided, pulls relevant memories from the active
+    environment's memory backend as extra context and records this turn -
+    same optional-enhancement behavior as fast mode (see src/rag/memory.py).
     """
     start_time = time.time()
     trace: list[str] = []
@@ -176,8 +185,10 @@ def answer_question_thinking(question: str, k: int = TOP_K) -> AnswerResult:
         rewrite_count += 1
         trace.append(f"rewrite({rewrite_count}): {current_question!r}")
 
-    answer = _generate_answer(question, chunks, relevant_indices)
+    memories = get_relevant_memories(user_id, question)
+    answer = _generate_answer(question, chunks, relevant_indices, memories)
     trace.append("generate")
+    add_memory(user_id, question, answer)
 
     used_chunks = [chunks[i] for i in relevant_indices if i < len(chunks)] if relevant_indices else chunks
     sources = [
@@ -202,6 +213,7 @@ def answer_question_thinking(question: str, k: int = TOP_K) -> AnswerResult:
             "chunks_searched": len(chunks),
             "chunks_relevant": len(relevant_indices),
             "rewrite_count": rewrite_count,
+            "memories_used": len(memories),
             "trace": trace,
         },
     )

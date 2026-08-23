@@ -2,7 +2,7 @@
 # Web Framework & API
 fastapi==0.100.1
 uvicorn==0.23.2
-pydantic==2.1.1
+pydantic==2.9.2
 python-multipart==0.0.6
 
 # Messaging
@@ -31,3 +31,6 @@ cryptography==42.0.5
 
 # Phase 3: Cloud environment bundle (Pinecone storage)
 pinecone==9.1.0
+
+# Phase 5: Conversation memory (cloud environment bundle)
+mem0ai==2.0.18

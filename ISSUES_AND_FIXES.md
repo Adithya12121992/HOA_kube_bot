@@ -10,6 +10,8 @@ Documents the extract → clean → chunk pipeline has been run against, to trac
 
 | Date | Scope | Result |
 |---|---|---|
+| 2026-08-22 | Mem0 conversation memory, both backends, real 2-turn conversations end-to-end (not mocked) | Pass. See Resolved #14 below. |
+| 2026-08-22 | "Thinking" mode (corrective RAG: retrieve/grade/rewrite/generate), 3 real scenarios against real LM Studio + real ChromaDB data | Pass. See Resolved #13 below. |
 | 2026-08-22 | `/ask` event-loop-blocking fix: real concurrent test, real LM Studio call | Pass. See Resolved #12 below - a real, user-reported, in-production bug. |
 | 2026-08-22 | Dual-write `add_chunks()` against real ChromaDB + real Pinecone, redeployed to K8s | Pass. One real chunk written once, confirmed independently searchable from both backends with matching similarity scores (0.715 / 0.714) after flipping the environment toggle between calls. `reset()` confirmed clearing both. Both pods redeployed and stable after the change. |
 | 2026-08-22 | Config toggle cross-process propagation, real test | Found and fixed a real bug — see Resolved #11 below. Verified both the single-process and cross-process/pod cases separately. |
@@ -51,6 +53,34 @@ _(none currently — see Won't Fix below for the one known remaining gap)_
 ---
 
 ## Resolved Issues
+
+### 14. Mem0 wiring: real API contract differs from the naive-obvious call shape, plus a pydantic conflict
+**Found:** 2026-08-22, while wiring `src/rag/memory.py` into `query.py`/`thinking.py`
+**Fixed:** 2026-08-22, `src/rag/memory.py` (new), `requirements.txt`
+
+**Problem 1 — dependency conflict:** adding `mem0ai==2.0.18` to `requirements.txt` broke a clean install: `mem0ai>=2.7.3` requires `pydantic>=2.7.3`, but this project pinned `pydantic==2.1.1`. Fixed by bumping to `pydantic==2.9.2` (still inside fastapi's own looser constraint, `!=2.0.0,!=2.0.1,<3.0.0,>=1.7.4`). Verified a full clean install in a scratch venv afterward, then re-verified every real project import.
+
+**Problem 2 — API contract:** the obvious call, `client.search(question, user_id=user_id)`, raises `ValueError: Top-level entity parameters frozenset({'user_id'}) are not supported in search(). Use filters={'user_id': '...'} instead.` The real signature is `client.search(query, filters={"user_id": user_id}, version="v2")`, returning `{"results": [{"memory": ..., "score": ...}, ...]}`. Also: `add()` returns immediately with `{"status": "PENDING"}` — Mem0 does its own async fact-extraction from the conversation in the background, so a memory added this turn is not guaranteed searchable on the very next call (observed a few seconds' lag in testing). Not a problem for this project's usage (only affects one user's own next question, not a hot shared path), but worth knowing before assuming a memory "didn't get saved."
+
+**Fix:** `src/rag/memory.py` — `get_relevant_memories()`/`add_memory()`, dispatching on `get_environment()`: real Mem0 `MemoryClient` for `cloud`, a plain in-process `dict[user_id, list[turns]]` for `local` (session memory only, intentionally lost on restart — that's the designed distinction from Mem0, not a gap). Both are optional enhancements: no `user_id` supplied, or lookup/write fails, and the answer flow proceeds unaffected (`try`/`except` + `logger.warning`, never raises into the request path). Wired into `answer_question()` (`query.py`) and `answer_question_thinking()` (`thinking.py`) via a `user_id` param already exposed on the `/ask` endpoint's `AskRequest`.
+
+**Verification (real, not mocked):**
+- **Local:** two real questions through `answer_question()` with the same `user_id`, `ENVIRONMENT=local`. Turn 1 ("When are board meetings held?") answered correctly with `memories_used: 0`. Turn 2 ("What time is that meeting again?" — meaningless without turn 1's context) correctly answered "6:30 PM" with `memories_used: 1`, confirming the in-process session dict round-trips real Q&A turns.
+- **Cloud:** same two-turn test, `ENVIRONMENT=cloud`, real Mem0 API + real Pinecone retrieval + real Anthropic generation, no mocks. Turn 1 answered correctly (`memories_used: 0`). Waited ~8s for Mem0's async fact-extraction, then turn 2 correctly answered "6:30 PM" citing the memory (`memories_used: 1`), confirming the real `add()`/`search()` round trip works end-to-end through the actual integration code, not just the raw client. Test data cleaned up afterward via `client.delete_all(user_id=...)`.
+- Noted (not investigated further, not a functional bug): after the cloud test's correct output printed, the Python process crashed on interpreter exit with `libc++abi: terminating due to uncaught exception of type std::__1::system_error: recursive_mutex lock failed`. This happens during native-library teardown after the answer was already returned, not during request handling — consistent with a known class of onnxruntime/grpc shutdown races on macOS, not a request-path defect. Worth revisiting if it ever surfaces inside the actual long-running service process rather than a short-lived test script.
+
+### 13. "Thinking" mode was a UI-only no-op — the actual corrective-RAG code was never wired in
+**Found:** 2026-08-22, auditing what the "thinking" toggle in the UI actually did
+**Fixed:** 2026-08-22, `src/rag/thinking.py` (new), `src/services/chatbot/service.py`, commit `51ca24f`
+
+**Problem:** The retrieval-mode toggle (`fast` / `thinking`) existed in the UI and in `get_retrieval_mode()`, but `service.py`'s `/ask` endpoint called `answer_question()` (fast mode) unconditionally — the toggle changed no behavior. A prototype implementation, `src/rag/rag_graph.py`, existed but was never audited or connected: it hardcoded an `OpenAI` client pointed at `http://localhost:1234/v1` with `model="gpt-3.5-turbo"` (not a model LM Studio would actually have loaded), had debug `print()` calls and hardcoded `/tmp/debug_message.txt` writes, and predated this project's `llm.py`/`store.py` environment-aware abstractions entirely.
+
+**Fix:** New module `src/rag/thinking.py`, keeping the prototype's real design work (doc-type-aware grading prompt distinguishing governing/advisory/report chunks, bounded rewrite loop, citation-based generation prompt) but rewired onto the current architecture — `llm.generate()` and `store.search()` instead of a hardcoded client, and reusing `Source`/`AnswerResult`/`_build_context` from `query.py`. Implemented as a plain bounded `while` loop (retrieve → grade → rewrite if insufficient, up to `MAX_REWRITES=2` → generate), not a LangGraph `StateGraph` — the control flow is simple/linear enough that a graph library adds no value and a plain function is easier to test directly. `rag_graph.py` deleted (`git rm`). `service.py`'s `/ask` now dispatches on `get_retrieval_mode()` to call either `answer_question()` or `answer_question_thinking()`.
+
+**Verification (3 real end-to-end scenarios, real LM Studio, real ChromaDB data, not mocked):**
+1. Doc-type-aware grading: a report-type question and a governing-type question against a mixed corpus each correctly favored the right chunk type, matching the grading prompt's stated priority rules.
+2. Bounded rewrite behavior: a colloquially-phrased question that failed initial grading correctly triggered query rewriting (observed in the trace), bounded at `MAX_REWRITES=2`, and terminated rather than looping indefinitely.
+3. Safe refusal: a question with no answerable content in the corpus correctly returned "The documents don't address this question." rather than hallucinating, after exhausting the rewrite budget.
 
 ### 12. `/ask` blocked the event loop, causing K8s to kill the pod mid-generation
 **Found:** 2026-08-22, real user report: asked a question, got "Failed to fetch" in the browser; LM Studio's own logs showed "Client disconnected. Stopping generation..." partway through, with no code change or redeploy happening at the time
