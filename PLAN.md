@@ -1,10 +1,25 @@
 # HOA Bot: Complete Implementation Plan
 ## From Docker Migration to Benchmarks & Evals
 
-**Status:** Ready to execute  
+**Status:** Original plan. For current build/test/verification status, see [`ISSUES_AND_FIXES.md`](ISSUES_AND_FIXES.md).
 **Total Time:** ~35-40 hours across 2-3 weeks (simplified with 2 toggles)  
 **Approach:** Iterative (complete one phase before next)  
 **Last Updated:** 2026-08-22
+
+## Current Status Summary
+
+| Phase | Status |
+|---|---|
+| 1: Docker + Tesseract | Docker done; OCR/Tesseract not built (see README.md "Known Gaps") |
+| 2: Chunking & Embedding | Done — see `ISSUES_AND_FIXES.md` #1-#3 |
+| 3: Environment Bundles | Done — `ENVIRONMENT` (local/cloud) toggle, dual-write storage, see `ISSUES_AND_FIXES.md` #9-#11 |
+| 4: Sample Data | Done — 40 real HOA documents in `docs/` |
+| 5: Unified Service | Done — one FastAPI service (`hoa-bot`) for upload UI + chat UI + REST API |
+| 6: Test Suite | Done — 69 tests (unit + integration), see `ISSUES_AND_FIXES.md` #16 |
+| 7-9: Benchmarking, Run, Analysis | Not built (see README.md "Known Gaps") |
+| 10: Documentation & Polish | This documentation pass (2026-08-23) |
+
+Also built since the plan was written: `thinking.py` for corrective RAG (`ISSUES_AND_FIXES.md` #13), real Mem0 and LlamaIndex integration (`ISSUES_AND_FIXES.md` #14-#15), and a ChromaDB cross-process consistency fix (`ISSUES_AND_FIXES.md` #17).
 
 ---
 

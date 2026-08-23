@@ -111,3 +111,79 @@
 7. ✅ Created all Docker images and K8s manifests
 8. ✅ Pushed to GitHub with documentation
 
+---
+
+## Since Week 1: RAG Pipeline, Environment Bundles, and Real Bug Fixes
+
+The prompts above cover the original Week 1 submission (RabbitMQ pipeline scaffolding). Everything below documents the substantial work since — turning that scaffolding into an actual working RAG chatbot. Full detail with real before/after verification data for every item lives in **[ISSUES_AND_FIXES.md](ISSUES_AND_FIXES.md)**; this section is a prompt-level summary.
+
+### 9. **Real PDF Extraction & Chunking**
+*Fix the naive per-page text extraction and chunking bugs found against a real 88-page CC&Rs document*
+
+- Replaced a naive `page.extract_text()` join with paragraph-aware extraction (word/line grouping, vertical-gap paragraph detection)
+- Built n-gram-based boilerplate detection to strip repeated headers/footers, including corrupted/merged variants
+- Fixed an 18x-too-many-chunks bug caused by unbounded paragraph-rewind overlap
+
+**Result:** `src/rag/extract.py`, `src/rag/clean.py`, `src/rag/chunk.py` — see `ISSUES_AND_FIXES.md` #1-#3
+
+### 10. **Environment Bundles: Local vs. Cloud**
+*Add a toggle that switches storage, LLM, RAG framework, and memory together as one bundle, with dual-write so both can be compared on identical data*
+
+- ChromaDB (local) + Pinecone (cloud), always dual-written on upload
+- Fixed a real config-propagation bug where the toggle was frozen at import time and invisible across pods
+- Wired real cloud LLM fallback (Anthropic), deliberately narrowed to Anthropic-only per explicit preference (not OpenAI, despite the key being available)
+
+**Result:** `src/config/settings.py`, `src/rag/store.py`, `src/rag/llm.py` — see `ISSUES_AND_FIXES.md` #9-#11
+
+### 11. **Unified FastAPI Service + Production Bug Fix**
+*Consolidate the upload UI and chat UI into one service, fix a real production incident*
+
+- Folded the separate web-ui concept into one FastAPI service (`hoa-bot`) serving both UI and REST API
+- Fixed a real user-reported production bug: a blocking LLM call inside an async endpoint was starving the event loop, causing Kubernetes' liveness probe to kill the pod mid-request
+- Replaced `kubectl port-forward` (idle timeout shorter than local LLM response time) with a real k3d Ingress for stable access
+
+**Result:** `src/services/chatbot/service.py`, `k8s/hoa-bot-ingress.yaml` — see `ISSUES_AND_FIXES.md` #12
+
+### 12. **Corrective RAG ("Thinking" Mode), Wired For Real**
+*Audit a prototype LangGraph implementation, decide whether it's actually worth keeping as a graph, and wire whichever approach is real*
+
+- Found the existing prototype hardcoded a wrong model name against the wrong LLM address, with debug artifacts left in
+- Rebuilt as a plain bounded retrieve→grade→rewrite→generate loop instead of a LangGraph `StateGraph` — deliberate simplification, not a missing feature
+- Verified against 3 real end-to-end scenarios (doc-type-aware grading, bounded rewrite behavior, safe refusal)
+
+**Result:** `src/rag/thinking.py` (new), `src/rag/rag_graph.py` deleted — see `ISSUES_AND_FIXES.md` #13
+
+### 13. **Mem0 Conversation Memory + Real LlamaIndex Integration**
+*Wire the two Phase-5 features that were never actually implemented, despite being claimed in settings/docs*
+
+- Mem0: real API (not mocked), correct `filters={"user_id":...}` contract (the naive call shape raises a real error), verified with real 2-turn conversations recalling prior context
+- LlamaIndex: found it was a documentation-only label with no actual dependency; added a real `PineconeVectorStore`-backed retrieval path for the cloud bundle, using this project's own embedding call for consistency with the write path
+
+**Result:** `src/rag/memory.py` (new), `src/rag/store.py` — see `ISSUES_AND_FIXES.md` #14-#15
+
+### 14. **Automated Test Suite**
+*Build unit + integration tests that lock in correctness, not just demo it*
+
+- 69 tests: pure-logic unit tests (chunking, cleaning, metadata, config) + integration tests against real ChromaDB and real embeddings, with only the outbound LLM call mocked
+- Found and fixed a real bug in the test harness itself along the way — a frozen-import issue where cached test modules pointed at a stale store instance across tests
+
+**Result:** `tests/` (new) — see `ISSUES_AND_FIXES.md` #16
+
+### 15. **Real ChromaDB Cross-Process Staleness Bug**
+*Diagnose a real user-reported bug: an uploaded document's content wasn't answerable via chat, even though the upload succeeded*
+
+- Root cause was not this project's own code but chromadb's internal `SharedSystemClient` process-level cache, which meant the long-running chat service never saw writes made by the separate consumer process without a restart
+- Verified the fix with a real synchronized cross-process reproduction, then confirmed against the live deployed service with zero pod restarts
+
+**Result:** `src/rag/store.py` — see `ISSUES_AND_FIXES.md` #17
+
+---
+
+## Key Technologies Added Since Week 1
+
+- **RAG:** `pdfplumber`, `sentence-transformers` (`BAAI/bge-small-en-v1.5`), ChromaDB, Pinecone, LlamaIndex
+- **LLMs:** LM Studio (local), Anthropic Claude (cloud)
+- **Memory:** Mem0
+- **API:** FastAPI (replacing the original Flask web-ui)
+- **Testing:** pytest, FastAPI `TestClient`
+

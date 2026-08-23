@@ -1,203 +1,161 @@
 # HOA Bot - Project Structure
 
-Production-grade directory organization for Kubernetes async pipeline with RAG chatbot.
+Current directory organization. See `ISSUES_AND_FIXES.md` for verification details on everything below.
 
 ```
 Kube_HOA_bot/
-├── README.md                      # Project overview
-├── PLAN.md                        # Implementation plan (10 phases)
-├── PROMPTS.md                     # Key development prompts
+├── README.md                      # Project overview, architecture, quick start
+├── GETTING_STARTED.md             # Command-reference quickstart
 ├── PROJECT_STRUCTURE.md           # This file
-├── requirements.txt               # Python dependencies
+├── ISSUES_AND_FIXES.md            # Source of truth: every real bug found & fixed, with verification data
+├── PLAN.md                        # Original phased implementation plan (historical)
+├── PROMPTS.md                     # Development prompt history
+├── requirements.txt                # Production dependencies
+├── requirements-dev.txt           # Test-only tooling (pytest, httpx pin) - not in Docker images
+├── pytest.ini                     # Test discovery config
+├── .env                           # Local dev environment variables (gitignored)
 ├── .gitignore
 │
-├── docker/                        # All Docker-related files
-│   ├── web-ui.dockerfile          # Web UI upload service
-│   ├── consumer.dockerfile        # Consumer: processes messages
-│   └── chatbot.dockerfile         # (Phase 5) REST API + HTML chatbot
+├── docker/
+│   ├── hoa-bot.dockerfile          # FastAPI service: upload UI + chat UI + REST API
+│   └── consumer.dockerfile         # Background document-processing worker
 │
-├── k8s/                           # All Kubernetes manifests
-│   ├── rmq.yaml                   # RabbitMQ cluster
-│   ├── pvc.yaml                   # Persistent volume (shared storage)
-│   ├── web-ui-deployment.yaml     # Web UI pod + service
-│   ├── consumer-deployment.yaml   # Consumer pod
-│   ├── chatbot-deployment.yaml    # (Phase 5) Chatbot pod + service
-│   └── namespace.yaml             # (Future) K8s namespace config
+├── k8s/
+│   ├── README.md                   # Kubernetes deployment guide
+│   ├── rmq.yaml                    # RabbitMQ cluster
+│   ├── pvc.yaml                    # Shared persistent volume (producer-consumer-pvc)
+│   ├── hoa-bot-deployment.yaml     # hoa-bot pod + service
+│   ├── consumer-deployment.yaml    # consumer pod
+│   └── hoa-bot-ingress.yaml        # Stable Ingress-based access (replaces kubectl port-forward)
 │
-├── src/                           # Source code
+├── src/
 │   ├── __init__.py
 │   │
-│   ├── services/                  # Microservices
+│   ├── services/
 │   │   ├── __init__.py
 │   │   │
-│   │   ├── web_ui/                # File upload web interface
+│   │   ├── chatbot/                # Upload UI + chat UI + REST API (one FastAPI service)
 │   │   │   ├── __init__.py
-│   │   │   ├── app.py             # Flask application
-│   │   │   └── templates/
-│   │   │       └── index.html     # Upload UI template
+│   │   │   ├── service.py          # Endpoints: /, /admin/upload, /ask, /config, /status, /health
+│   │   │   └── static/
+│   │   │       └── index.html      # Combined upload + chat UI (HTML/CSS/JS)
 │   │   │
-│   │   ├── producer/              # Test message producer
+│   │   ├── consumer/                # Message consumer + document-processing worker
 │   │   │   ├── __init__.py
-│   │   │   └── app.py             # RabbitMQ test producer
+│   │   │   └── app.py              # extract → chunk → embed → store → summarize → status
 │   │   │
-│   │   ├── consumer/              # Message consumer + processor
-│   │   │   ├── __init__.py
-│   │   │   ├── app.py             # Main consumer logic
-│   │   │   └── worker.py          # Document processing worker (Phase 2)
-│   │   │
-│   │   └── chatbot/               # REST API + HTML chatbot (Phase 5)
+│   │   └── producer/                # Test message producer (dev/debugging only)
 │   │       ├── __init__.py
-│   │       ├── service.py         # FastAPI application
-│   │       └── static/
-│   │           └── index.html     # Chat UI (HTML + CSS + JS)
+│   │       └── app.py
 │   │
-│   ├── rag/                       # RAG (Retrieval-Augmented Generation) pipeline
+│   ├── rag/                        # RAG (Retrieval-Augmented Generation) pipeline
 │   │   ├── __init__.py
-│   │   ├── chunk.py               # Document chunking (semantic, section-aware)
-│   │   ├── store.py               # Vector DB abstraction (ChromaDB + Pinecone)
-│   │   ├── pipeline.py            # RAG pipeline orchestrator
-│   │   ├── rag_graph.py           # LangGraph: retrieve → grade → rewrite → generate
-│   │   └── utils.py               # Shared utilities
+│   │   ├── extract.py              # PDF → paragraph-structured text (pdfplumber, vertical-gap detection)
+│   │   ├── clean.py                # Boilerplate/header/footer stripping (word n-gram + margin detection)
+│   │   ├── chunk.py                # Recursive chunking, doc-type classification, section/article metadata
+│   │   ├── store.py                # ChromaDB + Pinecone dual-write, environment-toggle-aware search,
+│   │   │                           #   LlamaIndex-backed cloud retrieval
+│   │   ├── llm.py                  # Environment-aware LLM caller (LM Studio local, Anthropic cloud)
+│   │   ├── query.py                # Fast-mode answer generation
+│   │   ├── thinking.py             # Thinking-mode: corrective RAG (retrieve→grade→rewrite→generate)
+│   │   ├── memory.py               # Conversation memory (Mem0 cloud, in-process dict local)
+│   │   ├── summarize.py            # Per-document summary generation
+│   │   └── status.py               # Shared per-document processing status (PVC-backed JSON)
 │   │
-│   └── config/                    # Configuration management
+│   └── config/
 │       ├── __init__.py
-│       └── settings.py            # Central config (toggles + fixed settings)
+│       └── settings.py             # Central config: environment/retrieval-mode toggles (PVC-shared JSON,
+│                                    #   not frozen module-level values - see ISSUES_AND_FIXES.md #11),
+│                                    #   API keys, model names, RabbitMQ connection settings
 │
-├── tests/                         # Test suite (Phase 6+)
+├── tests/
 │   ├── __init__.py
+│   ├── conftest.py                 # isolated_data_dir fixture: fresh ChromaDB + config per test,
+│   │                                #   reloads the full settings→store→memory→query→thinking chain
 │   │
-│   ├── unit/                      # Unit tests (individual components)
-│   │   ├── test_chunking.py
-│   │   ├── test_embedding.py
-│   │   ├── test_vector_db.py
-│   │   └── test_rag.py
+│   ├── unit/                       # Pure logic, no I/O
+│   │   ├── __init__.py
+│   │   ├── test_chunk.py           # classify_doc_type, section/article detection, overlap bounds
+│   │   ├── test_clean.py           # BoilerplateDetector detect/strip
+│   │   ├── test_config.py          # Config toggle persistence, cross-"process" visibility
+│   │   ├── test_memory_local.py    # In-process session memory backend
+│   │   └── test_store_metadata.py  # Metadata encode/decode round-trip
 │   │
-│   ├── integration/               # Integration tests (workflows)
-│   │   ├── test_pdf_to_chunks.py
-│   │   ├── test_dual_storage.py
-│   │   ├── test_consumer_pipeline.py
-│   │   └── test_query_pipeline.py
+│   ├── integration/                # Real ChromaDB + real embeddings, LLM call itself mocked
+│   │   ├── __init__.py
+│   │   ├── test_store_chromadb.py  # add_chunks/search/reset round trip
+│   │   ├── test_query_pipeline.py  # Fast-mode answer flow
+│   │   ├── test_thinking_pipeline.py  # Thinking-mode control flow (grade/rewrite/generate)
+│   │   └── test_service_api.py     # FastAPI TestClient: real routing, real config toggle
 │   │
-│   ├── benchmarks/                # Performance benchmarks
-│   │   ├── benchmark_latency.py
-│   │   ├── benchmark_accuracy.py
-│   │   └── benchmark_throughput.py
-│   │
-│   ├── evals/                     # Evaluation tests (quality)
-│   │   ├── eval_retrieval.py
-│   │   └── eval_answer_quality.py
-│   │
-│   ├── fixtures/                  # Test data & fixtures
-│   │   ├── sample_chunks.json
-│   │   ├── expected_embeddings.json
-│   │   └── benchmark_queries.json
-│   │
-│   └── conftest.py                # Pytest configuration
+│   ├── benchmarks/                 # Empty - not built (see README.md "Known Gaps")
+│   ├── evals/                      # Empty - not built (see README.md "Known Gaps")
+│   └── fixtures/                   # Empty - not currently used
 │
-├── docs/                          # Documentation
-│   ├── README.md                  # Getting started
-│   │
-│   ├── samples/                   # Sample PDFs for testing
-│   │   ├── README.md
-│   │   ├── Sample_Governing_Rules.pdf
-│   │   ├── Sample_Financial_Report.pdf
-│   │   ├── Sample_Inspection_Report.pdf
-│   │   ├── Sample_Disclosure_Document.pdf
-│   │   └── Sample_Meeting_Minutes.pdf
-│   │
-│   ├── benchmarks/                # Benchmark results
-│   │   ├── benchmark-comparison.md
-│   │   ├── benchmark_results.json
-│   │   ├── eval_results.json
-│   │   ├── eval_answer_results.json
-│   │   └── comparison_report.json
-│   │
-│   ├── architecture/              # Design documentation
-│   │   ├── chatbot_architecture.md
-│   │   ├── vector_db_architecture.md
-│   │   └── config_structure.md
-│   │
-│   └── api/                       # API documentation
-│       └── endpoints.md
+├── docs/                           # Real sample HOA documents used for verification throughout
+│   ├── 0. Coversheet.pdf
+│   ├── 30. CC&Rs (Required Civil Code Sec. 4525).pdf
+│   ├── 32. Annual Budget Report...pdf
+│   ├── ... (40 real documents total: governing, financial, advisory, report types)
+│   ├── api/                        # Empty
+│   └── architecture/               # Empty
 │
-├── scripts/                       # Utility scripts
-│   ├── setup_cluster.sh           # Create k3d cluster
-│   ├── deploy.sh                  # Deploy to Kubernetes
-│   ├── generate_sample_pdfs.py    # Generate test data
-│   └── run_benchmarks.sh          # Run benchmark suite
-│
-├── .venv/                         # Python virtual environment (gitignored)
-├── .chroma_data/                  # Local ChromaDB data (gitignored)
-└── chunks.json                    # Generated chunks (gitignored)
+├── venv/                           # Python virtual environment (gitignored)
+├── local_test_data/                # Local dev DATA_DIR: .chroma_data/, status/, config.json (gitignored)
+└── .pytest_cache/                  # Test cache (gitignored)
 ```
 
 ---
 
-## Directory Purpose Summary
+## Notes on a Few Directories
 
-| Directory | Purpose | Phase |
-|-----------|---------|-------|
-| `docker/` | Container images for all services | Phase 1 |
-| `k8s/` | Kubernetes manifests for deployment | Phase 1 |
-| `src/services/web_ui/` | File upload interface | Phase 0 (existing) |
-| `src/services/producer/` | Test message producer | Phase 0 (existing) |
-| `src/services/consumer/` | Message processor + document ingestion | Phase 2 |
-| `src/services/chatbot/` | REST API + HTML chatbot UI | Phase 5 |
-| `src/rag/` | RAG pipeline (chunking, embedding, retrieval) | Phase 2-3 |
-| `src/config/` | Centralized configuration management | Phase 3-5 |
-| `tests/` | Comprehensive test suite | Phase 6+ |
-| `docs/samples/` | Sample PDFs for testing | Phase 4 |
-| `docs/benchmarks/` | Benchmark results & analysis | Phase 8-9 |
-| `docs/architecture/` | Design & architecture docs | Ongoing |
-| `scripts/` | Utility scripts for setup & deployment | Ongoing |
+- `web_ui` is not a separate service — `hoa-bot` (FastAPI) serves both the upload UI and the chat UI from one service.
+- No standalone `pipeline.py` orchestrator — `consumer/app.py` calls the `rag/` modules directly in sequence.
+- `rag_graph.py` was removed — `thinking.py` implements corrective RAG as a plain bounded loop instead (see `ISSUES_AND_FIXES.md` #13 for why).
+- `scripts/` and `tests/benchmarks/`, `tests/evals/` are present but empty — not built yet (see README.md "Known Gaps").
 
 ---
 
 ## Key Files
 
 ### Configuration
-- **`src/config/settings.py`** — Central config with:
-  - User toggles: `storage_mode` (local/hybrid), `retrieval_mode` (fast/thinking)
-  - Fixed config: embedding model, chunk size, Pinecone API, RabbitMQ, etc.
+- **`src/config/settings.py`** — `get_environment()` / `get_retrieval_mode()` read a shared JSON file on the PVC fresh on every call (not frozen module-level values — this was a real bug, fixed, see `ISSUES_AND_FIXES.md` #11). `update_config()` writes to it.
 
 ### Services
-- **`src/services/web_ui/app.py`** — Flask app for uploading files
-- **`src/services/producer/app.py`** — Test producer (optional, for development)
-- **`src/services/consumer/app.py`** — Main message processor
-- **`src/services/chatbot/service.py`** — FastAPI for REST API + HTML chatbot
+- **`src/services/chatbot/service.py`** — the only user-facing service. `/ask` dispatches to fast or thinking mode based on the toggle, both wrapped in `asyncio.to_thread()` (see `ISSUES_AND_FIXES.md` #12 for why that matters).
+- **`src/services/consumer/app.py`** — the only thing that mutates document state. Runs entirely in the background, no HTTP surface.
 
 ### RAG Pipeline
-- **`src/rag/chunk.py`** — Document chunking
-- **`src/rag/store.py`** — Vector DB abstraction
-- **`src/rag/pipeline.py`** — Orchestrator
-- **`src/rag/rag_graph.py`** — LangGraph implementation
+- **`src/rag/store.py`** — the most load-bearing file: dual-write, environment-toggle search dispatch, LlamaIndex integration, and a real fix for a ChromaDB cross-process staleness bug (`ISSUES_AND_FIXES.md` #17).
+- **`src/rag/thinking.py`** — corrective RAG, not a LangGraph `StateGraph`.
+- **`src/rag/memory.py`** — Mem0 (cloud) or in-process dict (local), both optional enhancements keyed by `user_id`.
 
 ### Deployment
-- **`docker/web-ui.dockerfile`** — Web UI container
-- **`docker/consumer.dockerfile`** — Consumer container
-- **`docker/chatbot.dockerfile`** — Chatbot service container
-- **`k8s/web-ui-deployment.yaml`** — Web UI deployment
-- **`k8s/consumer-deployment.yaml`** — Consumer deployment
-- **`k8s/chatbot-deployment.yaml`** — Chatbot deployment (Phase 5)
+- **`docker/hoa-bot.dockerfile`**, **`docker/consumer.dockerfile`** — both install CPU-only PyTorch before `requirements.txt` (cuts image size from ~9GB to ~2.5GB).
+- **`k8s/hoa-bot-ingress.yaml`** — real k3d port-published Ingress, replacing `kubectl port-forward` (whose idle timeout is shorter than a local LLM's response time).
 
 ---
 
 ## Import Examples
 
 ```python
-# Get configuration
-from src.config.settings import STORAGE_MODE, RETRIEVAL_MODE, get_config_dict
+# Configuration
+from src.config.settings import get_environment, get_retrieval_mode, update_config
 
-# Use RAG pipeline
-from src.rag.pipeline import RAGEngine
+# RAG pipeline
+from src.rag.extract import extract_document
 from src.rag.chunk import chunk_document
-from src.rag.store import VectorStore
+from src.rag.store import add_chunks, search, reset
+from src.rag.query import answer_question
+from src.rag.thinking import answer_question_thinking
+from src.rag.memory import get_relevant_memories, add_memory
+```
 
-# Run tests
-pytest tests/unit/          # Unit tests
-pytest tests/integration/   # Integration tests
-pytest tests/benchmarks/    # Performance benchmarks
-pytest tests/evals/         # Quality evaluation
+```bash
+# Tests
+pytest tests/unit/          # Unit tests (46)
+pytest tests/integration/   # Integration tests (23)
+pytest tests/ -v            # All 69
 ```
 
 ---
@@ -206,46 +164,23 @@ pytest tests/evals/         # Quality evaluation
 
 ```bash
 # 1. Setup
-python3 -m venv venv
+python3.11 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+pip install -r requirements-dev.txt   # for running tests
 
-# 2. Build Docker images
-docker build -f docker/web-ui.dockerfile -t web-ui:latest .
+# 2. Test locally before touching K8s
+pytest tests/ -v
+
+# 3. Build Docker images
+docker build -f docker/hoa-bot.dockerfile -t hoa-bot:latest .
 docker build -f docker/consumer.dockerfile -t consumer:latest .
-docker build -f docker/chatbot.dockerfile -t chatbot:latest .
 
-# 3. Deploy to K8s
-k3d cluster create HOA-Bot --servers 1 --agents 2
-kubectl create namespace hoa-pipeline
-kubectl apply -f k8s/rmq.yaml
-kubectl apply -f k8s/pvc.yaml
-kubectl apply -f k8s/web-ui-deployment.yaml
-kubectl apply -f k8s/consumer-deployment.yaml
+# 4. Deploy / redeploy
+k3d image import hoa-bot:latest consumer:latest -c HOA-Bot
+kubectl rollout restart deployment/hoa-bot deployment/consumer -n hoa-pipeline
+kubectl -n hoa-pipeline get pods   # verify Running, 0 restarts
 
-# 4. Test
-pytest tests/unit/ -v
-pytest tests/integration/ -v
-
-# 5. Benchmark (Phase 8)
-pytest tests/benchmarks/ -v
+# 5. Verify against the real deployed service
+curl http://localhost:8000/health
 ```
-
----
-
-## Phase Integration
-
-This structure supports the 10-phase implementation plan:
-
-- **Phase 1:** Docker migration → Use `docker/` files
-- **Phase 2:** Chunking & embedding → Implement `src/rag/chunk.py`, update `src/services/consumer/`
-- **Phase 3:** Dual storage → Enhance `src/rag/store.py`, update `src/config/settings.py`
-- **Phase 4:** Sample data → Place PDFs in `docs/samples/`
-- **Phase 5:** REST API + chatbot → Implement `src/services/chatbot/`
-- **Phase 6:** Tests → Add to `tests/` directories
-- **Phase 7-9:** Benchmarking → Results in `docs/benchmarks/`
-- **Phase 10:** Documentation → All docs in `docs/`
-
----
-
-**Structure is production-ready. Each directory has a single responsibility.**
