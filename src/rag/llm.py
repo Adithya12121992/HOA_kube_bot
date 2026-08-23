@@ -24,12 +24,12 @@ from src.config.settings import (
     ANTHROPIC_API_KEY,
     ANTHROPIC_MODEL,
     CLOUD_LLM_FALLBACK_ORDER,
-    ENVIRONMENT,
     LM_STUDIO_API_KEY,
     LM_STUDIO_BASE_URL,
     LM_STUDIO_MODEL,
     OPENAI_API_KEY,
     OPENAI_MODEL,
+    get_environment,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ def generate(prompt: str, max_tokens: int = 800, temperature: float = 0.3) -> Op
 
     Returns None if no LLM is reachable/configured — never raises.
     """
-    if ENVIRONMENT == "local":
+    if get_environment() == "local":
         return _try_lm_studio(prompt, max_tokens, temperature)
 
     for provider in CLOUD_LLM_FALLBACK_ORDER:

@@ -32,9 +32,9 @@ from sentence_transformers import SentenceTransformer
 from src.config.settings import (
     CHROMA_DB_PATH,
     EMBEDDING_MODEL,
-    ENVIRONMENT,
     PINECONE_API_KEY,
     PINECONE_INDEX_NAME,
+    get_environment,
 )
 
 # Suppress chromadb's posthog telemetry errors. anonymized_telemetry=False
@@ -312,7 +312,7 @@ def add_chunks(chunks: list[dict]) -> int:
     """
     if not chunks:
         return 0
-    if ENVIRONMENT == "cloud":
+    if get_environment() == "cloud":
         return _pinecone_add_chunks(chunks)
     return _chroma_add_chunks(chunks)
 
@@ -327,14 +327,14 @@ def search(query: str, k: int = 5) -> list[dict]:
     Returns:
         List of chunks with metadata and similarity score, ranked by similarity.
     """
-    if ENVIRONMENT == "cloud":
+    if get_environment() == "cloud":
         return _pinecone_search(query, k)
     return _chroma_search(query, k)
 
 
 def reset() -> None:
     """Clear the active environment's vector store."""
-    if ENVIRONMENT == "cloud":
+    if get_environment() == "cloud":
         _pinecone_reset()
     else:
         _chroma_reset()
